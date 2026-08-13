@@ -1,0 +1,9 @@
+[Unit]
+Description=Backup CampusServe MongoDB database
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/sbin/campusserve-mongodb-backup
+Nice=10
+IOSchedulingClass=best-effort

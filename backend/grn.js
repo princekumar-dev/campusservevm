@@ -1,0 +1,340 @@
+import { connectToDatabase } from '../lib/mongo.js'
+import { requireGateLocation } from '../lib/gateGeofence.js'
+import { GoodsReceipt, PurchaseOrder, DeliverySchedule, User, ServiceRequest } from '../models.js'
+import { isValidObjectId } from 'mongoose'
+import { storeNotification } from '../lib/notificationService.js'
+import { getProductId } from '../lib/productId.js'
+import { canReceivePo, getPoReceivingBlockReason } from '../lib/poReceiving.js'
+import { verifyIssuedPoQrToken } from '../lib/poQrToken.js'
+
+const roundMoney = value => Math.round((Number(value || 0) + Number.EPSILON) * 100) / 100
+
+export default async function handler(req, res) {
+  if (req.method === 'OPTIONS') return res.status(200).end()
+
+  try { await connectToDatabase() } catch (e) {
+    return res.status(503).json({ success: false, error: 'Database connection failed' })
+  }
+
+  const actorId = req.user ? req.user.id : (req.headers['x-user-id'] || 'system')
+  const actorRole = req.user ? req.user.role : (req.headers['x-user-role'] || '')
+  const actor = req.user || (isValidObjectId(actorId) ? await User.findById(actorId).lean() : null)
+  const actorName = actor ? actor.name : 'Unknown'
+
+  try {
+    const { id, action, poId, deliveryId } = req.query
+
+    // ── GET /api/grn ──────────────────────────────────────────────────────────
+    if (req.method === 'GET') {
+      if (!['admin', 'super_admin', 'manager', 'receiving_officer', 'accounts'].includes(actorRole)) {
+        return res.status(403).json({ success: false, error: 'You are not authorized to view goods receipts' })
+      }
+      if (id) {
+        const grn = await GoodsReceipt.findById(id).lean()
+        if (!grn) return res.status(404).json({ success: false, error: 'GRN not found' })
+        if (actorRole === 'manager') {
+          const ownedPo = await PurchaseOrder.exists({ _id: grn.poId, createdById: actorId })
+          if (!ownedPo) return res.status(403).json({ success: false, error: 'This GRN is not assigned to you' })
+        }
+        return res.json({ success: true, data: grn })
+      }
+      const filter = {}
+      if (poId) filter.poId = poId
+      if (deliveryId) filter.deliveryScheduleId = deliveryId
+      if (req.query.grnType) filter.grnType = req.query.grnType
+      if (actorRole === 'manager') {
+        const ownedPoIds = await PurchaseOrder.distinct('_id', { createdById: actorId })
+        filter.poId = filter.poId
+          ? { $in: ownedPoIds.filter(ownedId => String(ownedId) === String(filter.poId)) }
+          : { $in: ownedPoIds }
+      }
+      const grns = await GoodsReceipt.find(filter).select('-receiptEvidence.url -damageEvidence.url').sort({ createdAt: -1 }).lean()
+      grns.forEach(grn => {
+        grn.hasReceiptEvidence = Boolean(grn.receiptEvidence?.name)
+        grn.hasDamageEvidence = Boolean(grn.damageEvidence?.name)
+      })
+      const poIds = [...new Set(grns.map(grn => String(grn.poId || '')).filter(Boolean))]
+      const purchaseOrders = poIds.length
+        ? await PurchaseOrder.find({ _id: { $in: poIds } })
+          .select('poNumber vendorName status grandTotal expectedDeliveryDate deliveryLocation createdAt closedAt items serviceExecution.expenses serviceExecution.workEvidence invoice')
+          .lean()
+        : []
+      return res.json({ success: true, data: grns, purchaseOrders, total: grns.length })
+    }
+
+    // ── POST /api/grn — Create GRN ────────────────────────────────────────────
+    if (req.method === 'POST' && !id) {
+      const requestedPoId = String(req.body?.poId || '')
+      if (actorRole !== 'gate' || req.user?.scanPortal !== 'gate' || req.user?.scanTarget !== `/gate/po/${requestedPoId}`) {
+        return res.status(403).json({ success: false, error: 'Fresh Gate Officer login is required to record a scanned PO receipt' })
+      }
+
+      const { poId: bodyPoId, deliveryScheduleId, items, remarks, qrToken, receiptEvidence, damageEvidence } = req.body
+      if (!(await requireGateLocation(req, res)).allowed) return
+      if (!bodyPoId || !items || !items.length) {
+        return res.status(400).json({ success: false, error: 'poId and items are required' })
+      }
+      const qrPoId = await verifyIssuedPoQrToken(qrToken)
+      if (!qrPoId || qrPoId !== String(bodyPoId)) {
+        return res.status(403).json({ success: false, error: 'A valid PO QR code is required for gate receipt entry' })
+      }
+      const validatePhotoEvidence = (evidence, label) => {
+        if (!evidence) return undefined
+        const { name, url, mimeType, size } = evidence
+        const allowedTypes = ['image/jpeg', 'image/png']
+        const parsedSize = Number(size || 0)
+        if (!name || !url || !allowedTypes.includes(mimeType) || !String(url).startsWith(`data:${mimeType};base64,`)) {
+          const error = new Error(`${label} must be a valid JPG or PNG photo`)
+          error.statusCode = 400
+          throw error
+        }
+        if (!Number.isFinite(parsedSize) || parsedSize <= 0 || parsedSize > 4 * 1024 * 1024 || String(url).length > 5.7 * 1024 * 1024) {
+          const error = new Error(`${label} must be 4 MB or smaller`)
+          error.statusCode = 413
+          throw error
+        }
+        return {
+          name: String(name).slice(0, 160),
+          url,
+          mimeType,
+          size: parsedSize,
+          uploadedAt: new Date()
+        }
+      }
+      let validatedReceiptEvidence
+      let validatedDamageEvidence
+      try {
+        validatedReceiptEvidence = validatePhotoEvidence(receiptEvidence, 'Received-goods proof')
+        validatedDamageEvidence = validatePhotoEvidence(damageEvidence, 'Damage proof')
+      } catch (error) {
+        return res.status(error.statusCode || 400).json({ success: false, error: error.message })
+      }
+
+      const receiptActorId = actorId
+      const receiptActorName = actorName
+
+      const po = await PurchaseOrder.findById(bodyPoId)
+      if (!po) return res.status(404).json({ success: false, error: 'PO not found' })
+      if (!canReceivePo(po)) {
+        return res.status(409).json({ success: false, error: getPoReceivingBlockReason(po) })
+      }
+
+      // Financial values are allocated only to quantities accepted in this
+      // receipt. Using cumulative targets and taking their difference prevents
+      // rounding drift across multiple partial GRNs.
+      const previousAcceptedSubtotal = roundMoney(po.items.reduce(
+        (sum, poItem) => sum + Number(poItem.quantityAccepted || 0) * Number(poItem.unitPrice || 0),
+        0
+      ))
+      // Validate quantities per spec:
+      // accepted + damaged + rejected <= delivered
+      // cumulative accepted <= ordered
+      // remaining >= 0
+      const processedItems = []
+      for (const item of items) {
+        const deliveredNow = Number(item.quantityDeliveredNow || 0)
+        const acceptedNow = Number(item.quantityAcceptedNow || 0)
+        const damaged = Number(item.quantityDamaged || 0)
+        const rejected = Number(item.quantityRejected || 0)
+
+        if (![deliveredNow, acceptedNow, damaged, rejected].every(Number.isFinite) || [deliveredNow, acceptedNow, damaged, rejected].some(value => value < 0)) {
+          return res.status(400).json({ success: false, error: `Quantities must be valid non-negative numbers for item: ${item.poItemDescription}` })
+        }
+        if (acceptedNow + damaged + rejected > deliveredNow) {
+          return res.status(400).json({ success: false, error: `Accepted + Damaged + Rejected cannot exceed Delivered for item: ${item.poItemDescription}` })
+        }
+        // A GRN documents only products physically included in this receipt.
+        // Unreceived PO rows must not be copied into the GRN.
+        if (deliveredNow === 0) continue
+
+        // Find PO item and check cumulative
+        const poItem = po.items.find(pi =>
+          (item.poItemId && String(pi._id) === String(item.poItemId)) ||
+          (!item.poItemId && pi.description === item.poItemDescription)
+        )
+        if (!poItem) {
+          return res.status(400).json({ success: false, error: `PO item was not found: ${item.poItemDescription}` })
+        }
+        {
+          // Always use the server's current accepted quantity. Do not trust a
+          // stale or edited client-side "previously accepted" value.
+          const prevAccepted = Number(poItem.quantityAccepted || 0)
+          const cumulativeAccepted = prevAccepted + acceptedNow
+          if (cumulativeAccepted > poItem.quantityOrdered) {
+            return res.status(400).json({ success: false, error: `Cumulative accepted quantity exceeds ordered for: ${item.poItemDescription}` })
+          }
+          const remaining = poItem.quantityOrdered - cumulativeAccepted
+          if (remaining < 0) {
+            return res.status(400).json({ success: false, error: `Remaining quantity cannot be negative for: ${item.poItemDescription}` })
+          }
+          // Update PO item quantities
+          poItem.quantityAccepted = cumulativeAccepted
+          poItem.quantityRemaining = remaining
+          item.quantityRemaining = remaining
+          item.quantityPreviouslyAccepted = prevAccepted
+        }
+
+        const quantityOrdered = Math.max(1, Number(poItem.quantityOrdered || 1))
+        const unitPrice = roundMoney(poItem.unitPrice)
+        const taxRate = Math.max(0, Number(poItem.taxRate || 0))
+        const fullItemDiscount = Math.max(0, Number(poItem.discount || 0))
+        const cumulativeAccepted = Number(poItem.quantityAccepted || 0)
+        const previousAccepted = Number(item.quantityPreviouslyAccepted || 0)
+        const cumulativeDiscountTarget = cumulativeAccepted >= quantityOrdered
+          ? roundMoney(fullItemDiscount)
+          : roundMoney(fullItemDiscount * cumulativeAccepted / quantityOrdered)
+        const previousDiscountTarget = roundMoney(fullItemDiscount * previousAccepted / quantityOrdered)
+        const lineSubtotal = roundMoney(acceptedNow * unitPrice)
+        const discountAllocated = Math.max(0, roundMoney(cumulativeDiscountTarget - previousDiscountTarget))
+        const taxableAmount = Math.max(0, roundMoney(lineSubtotal - discountAllocated))
+        const previousTaxableTarget = Math.max(0, roundMoney(previousAccepted * unitPrice - previousDiscountTarget))
+        const cumulativeTaxableTarget = Math.max(0, roundMoney(cumulativeAccepted * unitPrice - cumulativeDiscountTarget))
+        const previousTaxTarget = roundMoney(previousTaxableTarget * taxRate / 100)
+        const cumulativeTaxTarget = roundMoney(cumulativeTaxableTarget * taxRate / 100)
+        const taxAmount = Math.max(0, roundMoney(cumulativeTaxTarget - previousTaxTarget))
+        const lineTotal = roundMoney(taxableAmount + taxAmount)
+
+        processedItems.push({
+          ...item,
+          productId: getProductId(poItem),
+          poItemId: String(poItem._id),
+          quantityDeliveredNow: deliveredNow,
+          quantityAcceptedNow: acceptedNow,
+          quantityDamaged: damaged,
+          quantityRejected: rejected,
+          unitPrice,
+          taxRate,
+          lineSubtotal,
+          discountAllocated,
+          taxableAmount,
+          taxAmount,
+          lineTotal
+        })
+      }
+      if (!processedItems.some(item => item.quantityDeliveredNow > 0)) {
+        return res.status(400).json({ success: false, error: 'Enter a delivered quantity for at least one item' })
+      }
+      if (processedItems.some(item => Number(item.quantityDamaged || 0) > 0) && !validatedDamageEvidence) {
+        return res.status(400).json({ success: false, error: 'Upload a damage proof photo when damaged quantity is recorded' })
+      }
+
+      // Determine GRN type
+      const allFulfilled = po.items.every(pi => (pi.quantityRemaining || 0) === 0)
+      const grnType = allFulfilled ? 'FINAL' : 'PARTIAL'
+      const subtotal = roundMoney(processedItems.reduce((sum, item) => sum + item.lineSubtotal, 0))
+      const discountTotal = roundMoney(processedItems.reduce((sum, item) => sum + item.discountAllocated, 0))
+      const taxTotal = roundMoney(processedItems.reduce((sum, item) => sum + item.taxAmount, 0))
+      const cumulativeAcceptedValue = roundMoney(previousAcceptedSubtotal + subtotal)
+      const poSubtotal = Math.max(0, Number(po.subtotal || 0))
+      const deliveryCharge = Math.max(0, Number(po.deliveryCharge || 0))
+      const previousDeliveryTarget = poSubtotal > 0
+        ? roundMoney(deliveryCharge * Math.min(previousAcceptedSubtotal / poSubtotal, 1))
+        : 0
+      const cumulativeDeliveryTarget = allFulfilled
+        ? roundMoney(deliveryCharge)
+        : poSubtotal > 0
+          ? roundMoney(deliveryCharge * Math.min(cumulativeAcceptedValue / poSubtotal, 1))
+          : 0
+      const deliveryChargeAllocated = Math.max(0, roundMoney(cumulativeDeliveryTarget - previousDeliveryTarget))
+      const grandTotal = roundMoney(subtotal - discountTotal + taxTotal + deliveryChargeAllocated)
+
+      const year = new Date().getFullYear()
+      const rnd = Math.floor(Math.random() * 900000) + 100000
+      const grnNumber = `GRN-${year}-${rnd}`
+
+      // A final receipt is the terminal PO event, regardless of whether the
+      // receiving screen was opened from the printed PO QR or manually.
+      const closesPo = grnType === 'FINAL'
+      const grn = new GoodsReceipt({
+        grnNumber, poId: bodyPoId, poNumber: po.poNumber, deliveryScheduleId,
+        grnType, status: 'FINALIZED', receivedBy: receiptActorId, receivedByName: receiptActorName,
+        source: qrToken ? 'PO_QR' : 'MANUAL',
+        gateVerifiedAt: qrToken ? new Date() : undefined,
+        remarks, items: processedItems,
+        subtotal, discountTotal, taxTotal, deliveryChargeAllocated, grandTotal,
+        cumulativeAcceptedValue, poGrandTotal: roundMoney(po.grandTotal),
+        receiptEvidence: validatedReceiptEvidence,
+        damageEvidence: validatedDamageEvidence
+      })
+      await grn.save()
+
+      // Update PO status
+      const oldPoStatus = po.status
+      po.status = closesPo ? 'CLOSED' : grnType === 'FINAL' ? 'FULFILLED' : 'PARTIALLY_FULFILLED'
+      po.statusHistory.push({
+        oldStatus: oldPoStatus,
+        newStatus: po.status,
+        actorId: receiptActorId,
+        actorName: receiptActorName,
+        comment: closesPo
+          ? `PO QR verified and final GRN created: ${grnNumber}. PO closed automatically.`
+          : `${grnType} GRN created: ${grnNumber}`,
+        createdAt: new Date()
+      })
+      await po.save()
+
+      // A request-backed PO completes the originating request at the same time.
+      if (closesPo && po.requestId) {
+        const serviceRequest = await ServiceRequest.findById(po.requestId)
+        if (serviceRequest && serviceRequest.status !== 'CLOSED') {
+          const previousRequestStatus = serviceRequest.status
+          serviceRequest.status = 'CLOSED'
+          serviceRequest.currentOwnerRole = null
+          serviceRequest.closedAt = new Date()
+          serviceRequest.statusHistory.push({
+            oldStatus: previousRequestStatus,
+            newStatus: 'CLOSED',
+            actorId: receiptActorId,
+            actorName: receiptActorName,
+            comment: `Purchase order ${po.poNumber} closed after successful QR receiving (${grnNumber})`
+          })
+          await serviceRequest.save()
+        }
+      }
+
+      // Update delivery schedule status
+      if (deliveryScheduleId) {
+        const ds = await DeliverySchedule.findById(deliveryScheduleId)
+        if (ds) {
+          const oldDsStatus = ds.status
+          ds.status = grnType === 'FINAL' ? 'FULLY_RECEIVED' : 'PARTIALLY_RECEIVED'
+          ds.statusHistory.push({ oldStatus: oldDsStatus, newStatus: ds.status, actorId: receiptActorId, actorName: receiptActorName, comment: `${grnType} GRN recorded`, createdAt: new Date() })
+          await ds.save()
+        }
+      }
+
+      // Make gate-created receipts immediately visible to the responsible
+      // managers through their notification bell and the shared GRN section.
+      if (qrToken) {
+        const managers = await User.find({ role: { $in: ['manager', 'super_admin'] }, isActive: true })
+          .select('email')
+          .lean()
+        await Promise.allSettled(managers.map(manager => storeNotification({
+          userEmail: manager.email,
+          title: `Gate GRN created: ${grnNumber}`,
+          body: `${po.poNumber} from ${po.vendorName} was manually verified at the gate.`,
+          url: '/grn',
+          type: 'gate_grn_created',
+          data: { grnId: grn._id, poId: po._id, poNumber: po.poNumber }
+        })))
+      }
+
+      return res.status(201).json({ success: true, data: grn, grnType, poStatus: po.status })
+    }
+
+    // ── POST /api/grn?id=&action=finalize — Finalize GRN ─────────────────────
+    if (req.method === 'POST' && id && action === 'finalize') {
+      const grn = await GoodsReceipt.findById(id)
+      if (!grn) return res.status(404).json({ success: false, error: 'GRN not found' })
+      if (grn.status === 'FINALIZED') return res.status(400).json({ success: false, error: 'GRN already finalized' })
+      grn.status = 'FINALIZED'
+      await grn.save()
+      return res.json({ success: true, data: grn })
+    }
+
+    return res.status(405).json({ success: false, error: 'Method not allowed' })
+  } catch (err) {
+    console.error('GRN API error:', err)
+    return res.status(500).json({ success: false, error: 'Internal server error' })
+  }
+}

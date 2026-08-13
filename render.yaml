@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: campus-servre-2
+    runtime: node
+    plan: free
+    # Never run seed-users here. The seed command is safe, but deployment
+    # should only install dependencies; server startup creates missing portal
+    # accounts non-destructively.
+    buildCommand: npm ci --omit=dev
+    startCommand: npm run server
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: PO_QR_SECRET
+        sync: false
+      - key: EMAIL_VERIFICATION_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        value: https://msec-campusserve.vercel.app
+      - key: ALLOWED_ORIGINS
+        value: https://msec-campusserve.vercel.app
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false

@@ -1,0 +1,527 @@
+import { useState, useEffect, useCallback } from 'react'
+import { useParams, useNavigate } from 'react-router-dom'
+import { useAlert } from '../components/AlertContext'
+import apiClient from '../utils/apiClient'
+import { getAuthOrNull } from '../utils/auth'
+import { ArrowLeft, Send, CheckCircle, XCircle, RefreshCw, Package, Truck, FileText, Clock, AlertCircle, Download, Upload, Eye } from 'lucide-react'
+
+const statusConfig = {
+  DRAFT: { label: 'Draft', color: 'bg-zinc-100 text-zinc-700 border-zinc-300 ring-1 ring-zinc-200', step: 0 },
+  SUBMITTED_FOR_APPROVAL: { label: 'Pending Approval', color: 'bg-amber-100 text-amber-800 border-amber-300 ring-1 ring-amber-200', step: 1 },
+  APPROVED: { label: 'Approved', color: 'bg-sky-100 text-sky-800 border-sky-300 ring-1 ring-sky-200', step: 2 },
+  SENT_TO_VENDOR: { label: 'Sent to Vendor', color: 'bg-violet-100 text-violet-800 border-violet-300 ring-1 ring-violet-200', step: 2 },
+  VENDOR_ACCEPTED: { label: 'Vendor Accepted', color: 'bg-cyan-100 text-cyan-800 border-cyan-300 ring-1 ring-cyan-200', step: 2 },
+  ACTIVE: { label: 'Verified & Active', color: 'bg-lime-100 text-lime-800 border-lime-300 ring-1 ring-lime-200', step: 2 },
+  PARTIALLY_FULFILLED: { label: 'Partially Fulfilled', color: 'bg-indigo-100 text-indigo-800 border-indigo-300 ring-1 ring-indigo-200', step: 3 },
+  FULFILLED: { label: 'Fulfilled', color: 'bg-teal-100 text-teal-800 border-teal-300 ring-1 ring-teal-200', step: 4 },
+  CLOSED: { label: 'Closed', color: 'bg-emerald-100 text-emerald-800 border-emerald-300 ring-1 ring-emerald-200', step: 5 },
+  REVISION_REQUIRED: { label: 'Revision Required', color: 'bg-orange-100 text-orange-800 border-orange-300 ring-1 ring-orange-200', step: 1 },
+  REJECTED: { label: 'Rejected', color: 'bg-red-100 text-red-800 border-red-300 ring-1 ring-red-200', step: -1 },
+  VENDOR_REJECTED: { label: 'Vendor Rejected', color: 'bg-fuchsia-100 text-fuchsia-800 border-fuchsia-300 ring-1 ring-fuchsia-200', step: -1 },
+  CANCELLED: { label: 'Cancelled', color: 'bg-slate-200 text-slate-700 border-slate-400 ring-1 ring-slate-300', step: -1 },
+}
+
+const poSteps = ['Draft', 'Signed PO Uploaded', 'Verified & Active', 'Partial Receipt', 'GRN Fulfilled', 'Closed']
+
+const numberValue = value => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+const money = value => numberValue(value).toFixed(2)
+
+const displayDate = (value, includeTime = false) => {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '—'
+  return includeTime ? date.toLocaleString('en-IN') : date.toLocaleDateString('en-IN')
+}
+
+function StatusTimeline({ currentStatus }) {
+  const cfg = statusConfig[currentStatus] || {}
+  const currentStep = cfg.step ?? 0
+  const isTerminal = ['REJECTED', 'VENDOR_REJECTED', 'CANCELLED'].includes(currentStatus)
+
+  return (
+    <div className="premium-kpi p-5">
+      <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">PO Progress</h3>
+      <div className="flex items-center space-x-1">
+        {poSteps.map((step, idx) => (
+          <div key={step} className="flex items-center flex-1">
+            <div className={`flex flex-col items-center flex-1 ${idx < poSteps.length - 1 ? 'relative' : ''}`}>
+              <div className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-black transition-all ${
+                isTerminal ? 'bg-rose-100 text-rose-600 border-2 border-rose-300' :
+                idx < currentStep ? 'bg-violet-600 text-white' :
+                idx === currentStep ? 'bg-violet-600 text-white ring-2 ring-violet-300 ring-offset-1 scale-110' :
+                'bg-slate-100 text-slate-400 border-2 border-slate-200'
+              }`}>
+                {isTerminal ? '×' : idx < currentStep ? '✓' : idx + 1}
+              </div>
+              <span className={`text-[11px] mt-1 font-bold text-center w-full leading-tight ${idx <= currentStep && !isTerminal ? 'text-violet-700' : 'text-slate-400'}`}>
+                {step}
+              </span>
+              {idx < poSteps.length - 1 && (
+                <div className={`absolute left-1/2 top-3 h-0.5 w-full -z-10 ${idx < currentStep && !isTerminal ? 'bg-violet-500' : 'bg-slate-200'}`} style={{ left: '50%', width: 'calc(100% - 1.5rem)' }} />
+              )}
+            </div>
+          </div>
+        ))}
+      </div>
+      {isTerminal && (
+        <div className="mt-3 text-center text-xs font-bold text-rose-600 bg-rose-50 border border-rose-200 rounded-lg px-3 py-1.5">
+          {statusConfig[currentStatus]?.label}
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function PurchaseOrderDetails() {
+  const { id } = useParams()
+  const navigate = useNavigate()
+  const [po, setPo] = useState(null)
+  const [isLoading, setIsLoading] = useState(true)
+  const [actionLoading, setActionLoading] = useState(false)
+  const [pdfLoading, setPdfLoading] = useState(false)
+  const [signedUpload, setSignedUpload] = useState(null)
+  const [activeTab, setActiveTab] = useState('Overview')
+  const [signedPhotoOpen, setSignedPhotoOpen] = useState(false)
+  const [signedPhotoLoading, setSignedPhotoLoading] = useState(false)
+  const [signedPhotoAttempted, setSignedPhotoAttempted] = useState(false)
+  const [cancelOpen, setCancelOpen] = useState(false)
+  const [cancelReason, setCancelReason] = useState('')
+  const { showSuccess, showError } = useAlert()
+  const auth = getAuthOrNull()
+
+  const isManager = auth?.role === 'manager'
+  const canDownload = isManager && (!po?.createdById || String(po.createdById) === String(auth?.id || auth?._id))
+
+  const fetchPO = useCallback(async () => {
+    setIsLoading(true)
+    try {
+      const res = await apiClient.get(`/api/purchase-orders?id=${id}`, { cache: false, dedupe: false })
+      if (res.success) setPo(res.data)
+      else showError('Not Found', res.error)
+    } catch (err) { showError('Error', err.message) }
+    finally { setIsLoading(false) }
+  }, [id, showError])
+
+  useEffect(() => { fetchPO() }, [fetchPO])
+  const loadSignedPo = useCallback(async () => {
+    if (!po?.signedPo?.hasFile || po.signedPo.url || signedPhotoLoading) return po?.signedPo?.url || ''
+    setSignedPhotoLoading(true)
+    try {
+      const res = await apiClient.get(`/api/purchase-orders?id=${id}&action=signed-po`, { cache: true, dedupe: true })
+      if (!res.success || !res.data?.url) throw new Error(res.error || 'Signed PO file is unavailable')
+      setPo(current => ({ ...current, signedPo: { ...current.signedPo, ...res.data, hasFile: true } }))
+      return res.data.url
+    } catch (error) {
+      showError('Preview unavailable', error.message)
+      return ''
+    } finally {
+      setSignedPhotoLoading(false)
+    }
+  }, [id, po?.signedPo?.hasFile, po?.signedPo?.url, showError, signedPhotoLoading])
+
+  useEffect(() => {
+    if (activeTab === 'Signed PO' && !signedPhotoAttempted) {
+      setSignedPhotoAttempted(true)
+      void loadSignedPo()
+    }
+  }, [activeTab, loadSignedPo, signedPhotoAttempted])
+  useEffect(() => {
+    if (!signedPhotoOpen) return undefined
+    const closeOnEscape = event => { if (event.key === 'Escape') setSignedPhotoOpen(false) }
+    document.addEventListener('keydown', closeOnEscape)
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', closeOnEscape)
+      document.body.style.overflow = previousOverflow
+    }
+  }, [signedPhotoOpen])
+
+  const doAction = async (action, payload = {}) => {
+    setActionLoading(true)
+    try {
+      const res = await apiClient.post(`/api/purchase-orders?id=${id}&action=${action}`, payload)
+      if (res.success) {
+        if (res.data) setPo(res.data)
+        showSuccess('Success', `PO ${action.replace(/-/g, ' ')} completed`)
+        return true
+      }
+      showError('Action Failed', res.error)
+    } catch (err) { showError('Error', err.message) }
+    finally { setActionLoading(false) }
+    return false
+  }
+
+  const selectSignedPoPhoto = (event) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+    if (!file) return
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      return showError('Invalid Photo', 'Use a JPG, PNG, or WebP image of the signed PO')
+    }
+    if (file.size > 4 * 1024 * 1024) {
+      return showError('Photo Too Large', 'The signed PO photo must be 4 MB or smaller')
+    }
+    const reader = new FileReader()
+    reader.onerror = () => showError('Upload Failed', 'The selected photo could not be read')
+    reader.onload = () => setSignedUpload({
+      name: file.name,
+      url: String(reader.result),
+      mimeType: file.type,
+      size: file.size
+    })
+    reader.readAsDataURL(file)
+  }
+
+  const uploadSignedPo = async () => {
+    if (!signedUpload) return showError('Photo Required', 'Select the signed official PO photo first')
+    const completed = await doAction('upload-signed-po', { document: signedUpload })
+    if (completed) setSignedUpload(null)
+  }
+
+  const cancelPurchaseOrder = async () => {
+    const reason = cancelReason.trim()
+    if (reason.length < 5) return showError('Reason Required', 'Enter at least 5 characters explaining why this PO is being cancelled')
+    const completed = await doAction('cancel', { comment: reason })
+    if (completed) {
+      setCancelOpen(false)
+      setCancelReason('')
+    }
+  }
+
+  const downloadPdf = async () => {
+    if (pdfLoading || !po) return
+    setPdfLoading(true)
+    try {
+      const freshRequestId = `${Date.now()}-${globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)}`
+      const blob = await apiClient.get(`/api/generate-pdf?type=purchase-order&id=${id}&template=academics-marksheet-v2&fresh=${encodeURIComponent(freshRequestId)}`, {
+        cache: false,
+        dedupe: false,
+        responseType: 'blob',
+        timeout: 120000
+      })
+      if (!(blob instanceof Blob) || blob.size === 0) throw new Error('The generated PDF was empty')
+      const objectUrl = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = objectUrl
+      link.download = `${po.poNumber || 'purchase-order'}.pdf`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
+      showSuccess('PDF Downloaded', `${po.poNumber}.pdf is ready`)
+    } catch (err) {
+      showError('PDF Download Failed', err.message || 'Unable to generate the purchase order PDF')
+    } finally {
+      setPdfLoading(false)
+    }
+  }
+
+  if (isLoading) return <div className="flex items-center justify-center min-h-[50vh]"><div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-violet-500" /></div>
+  if (!po) return <div className="text-center py-20 text-slate-400">PO not found</div>
+
+  const tabs = ['Overview', 'Items', 'Signed PO', 'History']
+  const cfg = statusConfig[po.status] || {}
+  const items = Array.isArray(po.items) ? po.items.filter(item => item && typeof item === 'object') : []
+  const statusHistory = Array.isArray(po.statusHistory) ? po.statusHistory.filter(entry => entry && typeof entry === 'object') : []
+  const canCancel = isManager && canDownload && ['DRAFT', 'ACTIVE'].includes(po.status)
+  return (
+    <div className="space-y-6 animate-fadeIn">
+      {cancelOpen && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-white/45 p-4 backdrop-blur-sm" role="dialog" aria-modal="true" aria-labelledby="cancel-po-title" onClick={() => !actionLoading && setCancelOpen(false)}>
+          <div className="w-full max-w-lg overflow-hidden rounded-3xl border border-white/80 bg-white shadow-[0_28px_80px_rgba(15,23,42,0.28)]" onClick={event => event.stopPropagation()}>
+            <div className="border-b border-rose-100 bg-gradient-to-br from-rose-50 to-white p-6">
+              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-rose-100 text-rose-600"><AlertCircle size={24} /></div>
+              <h2 id="cancel-po-title" className="text-xl font-black text-slate-900">Cancel {po.poNumber}?</h2>
+              <p className="mt-2 text-sm leading-6 text-slate-600">This stops receiving against the PO. If it belongs to a request, that request returns to the manager so a replacement PO can be created.</p>
+            </div>
+            <div className="space-y-2 p-6">
+              <label htmlFor="cancel-po-reason" className="text-xs font-black uppercase tracking-wider text-slate-600">Cancellation reason</label>
+              <textarea id="cancel-po-reason" value={cancelReason} onChange={event => setCancelReason(event.target.value.slice(0, 500))} rows={4} autoFocus placeholder="Explain why this purchase order must be cancelled..." className="w-full resize-none rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-800 outline-none transition focus:border-rose-400 focus:bg-white focus:ring-4 focus:ring-rose-100" />
+              <p className="text-right text-[11px] text-slate-400">{cancelReason.length}/500</p>
+              <div className="flex flex-col-reverse gap-3 pt-3 sm:flex-row sm:justify-end">
+                <button type="button" onClick={() => setCancelOpen(false)} disabled={actionLoading} className="rounded-xl border border-slate-200 px-5 py-2.5 text-sm font-bold text-slate-600 hover:bg-slate-50 disabled:opacity-50">Keep PO</button>
+                <button type="button" onClick={cancelPurchaseOrder} disabled={actionLoading || cancelReason.trim().length < 5} className="inline-flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-rose-600 to-red-600 px-5 py-2.5 text-sm font-black text-white shadow-lg shadow-rose-200 transition hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:translate-y-0">
+                  {actionLoading ? <RefreshCw size={16} className="animate-spin" /> : <XCircle size={16} />}{actionLoading ? 'Cancelling...' : 'Cancel PO'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {signedPhotoOpen && po.signedPo?.url && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center overflow-hidden bg-slate-950/55 p-3 backdrop-blur-md sm:p-6" role="dialog" aria-modal="true" aria-label="Full signed purchase order photo" onClick={() => setSignedPhotoOpen(false)}>
+          <div className="relative flex h-[calc(100dvh-1.5rem)] max-h-[900px] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-white/70 bg-white/95 shadow-[0_32px_90px_rgba(15,23,42,0.24),0_8px_30px_rgba(124,58,237,0.12)] ring-1 ring-violet-100/70 backdrop-blur-xl sm:h-[calc(100dvh-3rem)]" onClick={event => event.stopPropagation()}>
+            <div className="flex items-center justify-between gap-4 border-b border-slate-200 px-4 py-3">
+              <div className="min-w-0">
+                <p className="truncate text-sm font-black text-slate-800">{po.signedPo.name || 'Signed official PO'}</p>
+                <p className="text-xs text-slate-500">Full uploaded attachment</p>
+              </div>
+              <button type="button" onClick={() => setSignedPhotoOpen(false)} aria-label="Close full photo" className="rounded-full p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800">
+                <XCircle size={22} />
+              </button>
+            </div>
+            <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-slate-100 p-3">
+              <img src={po.signedPo.url} alt="Full signed official purchase order" className="block h-full w-full rounded-lg object-contain" />
+            </div>
+          </div>
+        </div>
+      )}
+      {/* Back */}
+      <button onClick={() => navigate('/purchase-orders')} className="flex items-center space-x-2 text-sm text-slate-500 hover:text-slate-700 transition-all font-semibold">
+        <ArrowLeft size={16} /><span>Back to Purchase Orders</span>
+      </button>
+
+      {/* Hero */}
+      <div className="relative flex flex-col items-start justify-between gap-5 overflow-hidden rounded-3xl border border-violet-100 bg-gradient-to-br from-white via-white to-violet-50/80 p-6 shadow-[0_18px_50px_rgba(76,29,149,0.08)] md:flex-row md:items-center">
+        <div className="pointer-events-none absolute -right-16 -top-20 h-52 w-52 rounded-full bg-violet-200/30 blur-3xl" />
+        <div className="min-w-0 max-w-full">
+          <span className="text-xs font-mono text-violet-600 font-bold">{po.poNumber}</span>
+          <h1 className="text-xl font-black text-slate-800 mt-1">{po.vendorName}</h1>
+          <p className="text-sm text-slate-500">Created by {po.createdBy || 'Unknown'} · {displayDate(po.createdAt)}</p>
+        </div>
+        <div className="flex w-full flex-col gap-3 md:w-auto md:min-w-fit md:items-end">
+          <span className={`self-end whitespace-nowrap rounded-full border px-3 py-1 text-xs font-bold ${cfg.color}`}>{cfg.label || po.status}</span>
+          <div className="flex w-full items-end justify-between gap-4 md:w-auto md:justify-end">
+            {canDownload && <button type="button" onClick={downloadPdf} disabled={pdfLoading} className="inline-flex shrink-0 items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-purple-600 px-4 py-2.5 text-xs font-black text-white shadow-lg shadow-violet-200 transition-all hover:-translate-y-0.5 hover:shadow-xl disabled:cursor-wait disabled:opacity-60">
+              {pdfLoading ? <RefreshCw size={15} className="animate-spin" /> : <Download size={15} />}
+              {pdfLoading ? 'Preparing PDF...' : 'Download PDF'}
+            </button>}
+            <div className="min-w-fit text-right">
+              <div className="text-xs text-slate-400">Grand Total</div>
+              <div className="whitespace-nowrap text-2xl font-black text-violet-700">₹{money(po.grandTotal)}</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Status Timeline */}
+      <StatusTimeline currentStatus={po.status} />
+
+      {/* Workflow Action Cards */}
+      {isManager && (
+        ['DRAFT', 'REVISION_REQUIRED'].includes(po.status) ||
+        (['ACTIVE', 'PARTIALLY_FULFILLED'].includes(po.status) && po.signedPo?.status !== 'VERIFIED')
+      ) && (
+        <div className="bg-white p-6 rounded-xl border border-violet-200 shadow-sm space-y-4 text-left">
+          <div>
+            <h3 className="flex items-center gap-2 text-sm font-black text-slate-800"><Upload size={17} className="text-violet-600" />Upload Signed Official PO</h3>
+            <p className="mt-1 text-xs text-slate-500">Download the PO, obtain the required official signatures, then upload a clear photo. The PO becomes verified and active immediately.</p>
+          </div>
+          {po.status === 'REVISION_REQUIRED' && po.signedPo?.verificationComment && (
+            <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700"><strong>Previous upload rejected:</strong> {po.signedPo.verificationComment}</div>
+          )}
+          <label className="flex cursor-pointer items-center justify-center gap-2 rounded-xl border-2 border-dashed border-violet-200 bg-violet-50/60 p-5 text-sm font-bold text-violet-700 hover:bg-violet-50">
+            <Upload size={18} />
+            <span>{signedUpload ? 'Choose another photo' : 'Select signed PO photo'}</span>
+            <input type="file" accept="image/jpeg,image/png,image/webp" onChange={selectSignedPoPhoto} className="hidden" />
+          </label>
+          {signedUpload && (
+            <div className="flex flex-col gap-4 rounded-xl border border-slate-200 p-4 sm:flex-row sm:items-center">
+              <img src={signedUpload.url} alt="Signed PO preview" className="h-28 w-full rounded-lg bg-slate-50 object-contain sm:w-40" />
+              <div className="min-w-0 flex-1"><p className="truncate text-sm font-bold text-slate-800">{signedUpload.name}</p><p className="text-xs text-slate-500">{(signedUpload.size / 1024 / 1024).toFixed(2)} MB</p></div>
+              <button onClick={uploadSignedPo} disabled={actionLoading} className="inline-flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 py-2.5 text-xs font-black text-white hover:bg-violet-700 disabled:opacity-50">
+                <Send size={14} />{actionLoading ? 'Uploading...' : 'Upload & Activate PO'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {canCancel && (
+        <div className="flex flex-col gap-4 rounded-2xl border border-rose-200/80 bg-gradient-to-r from-white via-white to-rose-50/70 p-5 shadow-[0_12px_35px_rgba(225,29,72,0.06)] sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <h3 className="flex items-center gap-2 text-sm font-black text-slate-800"><AlertCircle size={17} className="text-rose-600" />Need to stop this order?</h3>
+            <p className="mt-1 text-xs leading-5 text-slate-500">Cancellation is restricted to the manager who created the PO and requires an auditable reason.</p>
+          </div>
+          <button type="button" onClick={() => setCancelOpen(true)} className="inline-flex shrink-0 items-center justify-center gap-2 rounded-xl border border-rose-200 bg-white px-4 py-2.5 text-xs font-black text-rose-700 shadow-sm transition hover:-translate-y-0.5 hover:border-rose-300 hover:bg-rose-50">
+            <XCircle size={15} />Cancel Purchase Order
+          </button>
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div className="flex overflow-x-auto space-x-1 border-b border-slate-200 pb-px">
+        {tabs.map(tab => (
+          <button key={tab} onClick={() => setActiveTab(tab)}
+            className={`px-5 py-3 text-sm font-semibold whitespace-nowrap transition-all border-b-2 -mb-px ${activeTab === tab ? 'border-violet-600 text-violet-600 bg-violet-50/50' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+            {tab}
+          </button>
+        ))}
+      </div>
+
+      {/* Tab Content */}
+      {activeTab === 'Overview' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-3">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Order Details</h3>
+            {[
+              { label: 'PO Number', value: po.poNumber },
+              { label: 'PO Type', value: po.adminRequirementType === 'MAINTENANCE' ? 'Service PO' : po.adminRequirementType === 'REPLACEMENT' ? 'Replacement PO' : po.adminRequirementType === 'NEW_PURCHASE' ? 'Goods PO' : po.poType === 'SERVICE' ? 'Service PO' : po.poType === 'REPLACEMENT' ? 'Replacement PO' : 'Goods PO' },
+              { label: po.poType === 'SERVICE' || po.adminRequirementType === 'MAINTENANCE' ? 'Service Provider' : 'Vendor', value: po.serviceProviderName || po.vendorName },
+              { label: po.poType === 'SERVICE' || po.adminRequirementType === 'MAINTENANCE' ? 'Provider Email' : 'Vendor Address', value: po.serviceProviderEmail || po.vendorAddress || '—' },
+              { label: 'Delivery Address', value: po.deliveryAddress },
+              { label: 'Payment Terms', value: po.paymentTerms },
+              { label: 'Expected Delivery', value: displayDate(po.expectedDeliveryDate) },
+              { label: 'Approved By', value: po.approvedBy || '—' },
+            ].map(({ label, value }) => (
+              <div key={label} className="flex justify-between text-sm">
+                <span className="text-slate-500">{label}</span>
+                <span className="font-bold text-slate-800 text-right max-w-xs">{value}</span>
+              </div>
+            ))}
+          </div>
+          <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-3">
+            <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Financial Summary</h3>
+            {[
+              { label: 'Subtotal', value: `₹${money(po.subtotal)}` },
+              { label: 'Discount', value: `-₹${money(po.discountTotal)}` },
+              { label: 'GST / Tax', value: `₹${money(po.taxTotal)}` },
+              { label: 'Delivery Charge', value: `₹${money(po.deliveryCharge)}` },
+            ].map(({ label, value }) => (
+              <div key={label} className="flex justify-between text-sm">
+                <span className="text-slate-500">{label}</span>
+                <span className="font-semibold text-slate-700">{value}</span>
+              </div>
+            ))}
+            <div className="flex justify-between text-sm border-t border-slate-100 pt-3">
+              <span className="font-bold text-slate-800">Grand Total</span>
+              <span className="font-black text-violet-700 text-base">₹{money(po.grandTotal)}</span>
+            </div>
+          </div>
+          {(po.adminRequirementType || po.adminDescription || po.adminAssessmentNote) && (
+            <div className="bg-white p-6 rounded-xl border border-slate-200 shadow-sm space-y-3 lg:col-span-2">
+              <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Admin Product Description</h3>
+              {po.adminRequirementType && <p className="text-sm font-black text-violet-700">{String(po.adminRequirementType).replace(/_/g, ' ')}</p>}
+              {po.adminDescription && <p className="text-sm leading-6 text-slate-700">{po.adminDescription}</p>}
+              {po.adminAssessmentNote && <p className="rounded-xl bg-violet-50 p-3 text-xs font-semibold leading-5 text-violet-800">{po.adminAssessmentNote}</p>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'Items' && (
+        <div className="premium-card overflow-hidden">
+          <div className="p-5 border-b border-slate-100">
+            <h3 className="font-bold text-slate-800">Line Items ({items.length})</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-100 text-xs font-bold text-slate-400 uppercase tracking-wider">
+                  <th className="px-6 py-3">Product ID</th>
+                  <th className="px-6 py-3">Description</th>
+                  <th className="px-6 py-3 text-right">Ordered</th>
+                  <th className="px-6 py-3 text-right">Accepted</th>
+                  <th className="px-6 py-3 text-right">Remaining</th>
+                  <th className="px-6 py-3 text-right">Unit Price</th>
+                  <th className="px-6 py-3 text-right">Line Total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {items.map((item, idx) => {
+                  const ordered = numberValue(item?.quantityOrdered)
+                  const remaining = item?.quantityRemaining == null ? ordered : numberValue(item.quantityRemaining)
+                  const progress = ordered > 0 ? Math.max(0, ((ordered - remaining) / ordered) * 100) : 0
+                  return (
+                    <tr key={idx} className="hover:bg-slate-50/50">
+                      <td className="whitespace-nowrap px-6 py-4 font-mono text-xs font-bold text-violet-700">{item.productId || '—'}</td>
+                      <td className="px-6 py-4">
+                        <div className="font-semibold text-slate-800">{item.description}</div>
+                        {item.specification && <div className="text-xs text-slate-400 mt-0.5">{item.specification}</div>}
+                        {/* Progress bar */}
+                        <div className="mt-2 h-1.5 bg-slate-100 rounded-full w-32">
+                          <div className="h-full bg-violet-500 rounded-full transition-all" style={{ width: `${Math.min(progress, 100)}%` }} />
+                        </div>
+                        <div className="text-[11px] text-slate-400 mt-0.5">{progress.toFixed(0)}% received</div>
+                      </td>
+                      <td className="px-6 py-4 text-right text-slate-600">{ordered} {item.unit || 'unit'}</td>
+                      <td className="px-6 py-4 text-right text-emerald-600 font-semibold">{numberValue(item.quantityAccepted)}</td>
+                      <td className="px-6 py-4 text-right"><span className={`font-bold ${remaining > 0 ? 'text-amber-600' : 'text-emerald-600'}`}>{remaining}</span></td>
+                      <td className="px-6 py-4 text-right text-slate-600">₹{money(item.unitPrice)}</td>
+                      <td className="px-6 py-4 text-right font-bold text-slate-800">₹{money(item.lineTotal)}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'Signed PO' && (
+        <div className="premium-card overflow-hidden">
+          <div className="flex items-start justify-between gap-3 border-b border-slate-100 p-5">
+            <div className="min-w-0 flex-1">
+              <h3 className="font-bold text-slate-800">Signed Official Purchase Order</h3>
+              <p className="mt-1 text-xs text-slate-500">This verified artifact controls whether gate receiving and GRN creation are permitted.</p>
+            </div>
+            <span className={`flex-shrink-0 whitespace-nowrap rounded-full border px-3 py-1 text-xs font-black ${
+              po.signedPo?.status === 'VERIFIED' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' :
+              po.signedPo?.status === 'PENDING_VERIFICATION' ? 'border-amber-200 bg-amber-50 text-amber-700' :
+              po.signedPo?.status === 'REJECTED' ? 'border-rose-200 bg-rose-50 text-rose-700' :
+              'border-slate-200 bg-slate-50 text-slate-500'
+            }`}>{po.signedPo?.status ? String(po.signedPo.status).replace(/_/g, ' ') : 'NOT UPLOADED'}</span>
+          </div>
+          {po.signedPo?.url ? (
+            <div className="grid gap-6 p-5 lg:grid-cols-[minmax(0,1fr)_300px]">
+              <button type="button" onClick={() => setSignedPhotoOpen(true)} className="group overflow-hidden rounded-2xl border border-slate-200 bg-slate-50">
+                <img src={po.signedPo.url} alt="Signed official PO" className="max-h-[560px] w-full object-contain transition-transform group-hover:scale-[1.01]" />
+              </button>
+              <div className="space-y-3 text-sm">
+                {[
+                  ['File', po.signedPo.name],
+                  ['Uploaded by', po.signedPo.uploadedBy],
+                  ['Uploaded at', displayDate(po.signedPo.uploadedAt, true)],
+                  ['Verified by', po.signedPo.verifiedBy || 'Pending'],
+                  ['Verified at', displayDate(po.signedPo.verifiedAt, true)],
+                  ['Decision notes', po.signedPo.verificationComment || '—']
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-xl bg-slate-50 p-3">
+                    <div className="text-[11px] font-black uppercase tracking-wider text-slate-400">{label}</div>
+                    <div className="mt-1 break-words font-semibold text-slate-800">{value}</div>
+                  </div>
+                ))}
+                <button type="button" onClick={() => setSignedPhotoOpen(true)} className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-xs font-black text-white hover:bg-violet-700"><Eye size={15} />Open Full Photo</button>
+              </div>
+            </div>
+          ) : (
+            <div className="p-10 text-center">
+              <FileText className="mx-auto text-slate-300" size={42} />
+              <p className="mt-3 font-bold text-slate-700">No signed PO uploaded</p>
+              <p className="mt-1 text-xs text-slate-500">The responsible manager must upload the officially signed PO photo.</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === 'History' && (
+        <div className="premium-card p-6 space-y-4">
+          <h3 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Status History</h3>
+          <div className="space-y-3">
+            {statusHistory.slice().reverse().map((entry, idx) => (
+              <div key={idx} className="flex space-x-3 text-sm">
+                <div className="flex flex-col items-center">
+                  <div className="w-2 h-2 rounded-full bg-violet-500 mt-1.5 flex-shrink-0" />
+                  {idx < statusHistory.length - 1 && <div className="w-px flex-1 bg-slate-200 mt-1" />}
+                </div>
+                <div className="pb-4 flex-1">
+                  <div className="flex items-center justify-between">
+                    <span className="font-bold text-slate-800">{entry.newStatus?.replace(/_/g, ' ')}</span>
+                    <span className="text-xs text-slate-400">{displayDate(entry.createdAt, true)}</span>
+                  </div>
+                  {entry.comment && <p className="text-xs text-slate-500 mt-0.5">{entry.comment}</p>}
+                  <p className="text-xs text-slate-400 mt-0.5">by {entry.actorName}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

@@ -1,0 +1,268 @@
+// Service Worker for Push Notifications
+const CACHE_NAME = 'msec-connect-v5';
+const urlsToCache = [
+  '/manifest.json'
+];
+
+// Install Service Worker
+self.addEventListener('install', (event) => {
+  console.log('Service Worker: Installing...');
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then((cache) => {
+        console.log('Service Worker: Caching files');
+        // Use addAll with error handling - cache only what's available
+        return Promise.allSettled(
+          urlsToCache.map(url => 
+            cache.add(url).catch(err => {
+              console.warn('Service Worker: Failed to cache', url, err);
+              return null;
+            })
+          )
+        );
+      })
+      .then(() => self.skipWaiting())
+      .catch(err => {
+        console.error('Service Worker: Installation failed', err);
+        return self.skipWaiting();
+      })
+  );
+});
+
+// Activate Service Worker
+self.addEventListener('activate', (event) => {
+  console.log('Service Worker: Activating...');
+  event.waitUntil(
+    caches.keys().then((cacheNames) => {
+      return Promise.all(
+        cacheNames.map((cache) => {
+          if (cache !== CACHE_NAME) {
+            console.log('Service Worker: Clearing old cache');
+            return caches.delete(cache);
+          }
+        })
+      );
+    }).then(() => self.clients.claim())
+  );
+});
+
+// Fetch Event - with error handling
+self.addEventListener('fetch', (event) => {
+  const requestUrl = new URL(event.request.url);
+
+  // Vite development resources (including HMR modules) must go directly to
+  // the dev server. A service worker response here can replace a temporary
+  // network failure with a cached/synthetic response and break the whole app.
+  if (requestUrl.hostname === 'localhost' || requestUrl.hostname === '127.0.0.1') {
+    return;
+  }
+
+  // Skip non-GET requests and chrome-extension requests
+  if (event.request.method !== 'GET' || event.request.url.startsWith('chrome-extension://')) {
+    return;
+  }
+
+  // Let the application handle API and cross-origin failures. Intercepting
+  // them here can turn an ordinary network error into an unhandled service
+  // worker fetch rejection.
+  if (requestUrl.origin !== self.location.origin || requestUrl.pathname.startsWith('/api/')) {
+    return;
+  }
+  
+  // Never cache the SPA HTML. A cached authenticated route can reference chunks
+  // from an older Vercel deployment and crash before React can recover.
+  if (event.request.mode === 'navigate' || event.request.headers.get('accept')?.includes('text/html')) {
+    event.respondWith(
+      fetch(event.request, { cache: 'no-store' }).catch(() => new Response(
+        '<!doctype html><title>CampusServe offline</title><h1>Connection unavailable</h1><p>Please reconnect and reload.</p>',
+        { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } }
+      ))
+    );
+    return;
+  }
+
+  // Deployment assets are content-hashed, but an open SPA can still request a
+  // lazy chunk from a previous Vercel deployment. Prefer the network so a
+  // current asset is never shadowed by stale cache state, with cached fallback
+  // retained for brief outages/offline use.
+  event.respondWith(
+    fetch(event.request)
+      .then((response) => {
+        if (response && response.ok) {
+          const responseToCache = response.clone();
+          event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.put(event.request, responseToCache)));
+        }
+        return response;
+      })
+      .catch(() => caches.match(event.request).then(response => response || new Response('', {
+        status: 503,
+        statusText: 'Service Unavailable'
+      })))
+  );
+});
+
+// Push Notification Event - Robust handling and async parsing
+self.addEventListener('push', (event) => {
+  console.log('Service Worker: Push notification received', event);
+  event.waitUntil((async () => {
+    let notificationData = {
+      title: 'CampusServe',
+      body: 'You have a new notification',
+      icon: '/images/android-chrome-192x192.png',
+      badge: '/images/favicon-32x32.png',
+      vibrate: [200, 100, 200],
+      tag: 'msec-notification',
+      requireInteraction: false,
+      silent: false,
+      renotify: true,
+      dir: 'auto',
+      lang: 'en-US',
+      data: {}
+    };
+
+    // Parse push data (prefer JSON, fall back to text)
+    if (event.data) {
+      try {
+        const data = event.data.json();
+        notificationData = {
+          ...notificationData,
+          ...data,
+          icon: data.icon || notificationData.icon,
+          badge: data.badge || notificationData.badge,
+          data: data.data || {},
+          tag: data.tag || notificationData.tag
+        };
+      } catch (err) {
+        try {
+          const txt = event.data && event.data.text ? await event.data.text() : '';
+          notificationData.body = txt || notificationData.body;
+        } catch (e2) {
+          console.error('Error reading push data:', e2);
+        }
+      }
+    }
+
+    const notificationOptions = {
+      body: notificationData.body,
+      icon: notificationData.icon,
+      badge: notificationData.badge,
+      vibrate: notificationData.vibrate,
+      tag: notificationData.tag || `notification-${Date.now()}`,
+      requireInteraction: notificationData.requireInteraction || false,
+      silent: notificationData.silent || false,
+      renotify: true,
+      timestamp: Date.now(),
+      data: notificationData.data || {},
+      dir: notificationData.dir || 'auto',
+      lang: notificationData.lang || 'en-US',
+      image: notificationData.image,
+      actions: notificationData.actions || []
+    };
+
+    // Notify clients
+    const notifyPromise = (async () => {
+      try {
+        const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+        for (const client of allClients) {
+          try {
+            client.postMessage({ type: 'NOTIFICATION_RECEIVED', title: notificationData.title, body: notificationData.body, data: { ...notificationData.data, timestamp: Date.now() } });
+          } catch (e) {
+            // ignore per-client failures
+          }
+        }
+      } catch (e) {
+        // ignore matching errors
+      }
+    })();
+
+    // Show notification
+    const showPromise = (async () => {
+      try {
+        await self.registration.showNotification(notificationData.title || 'CampusServe', notificationOptions);
+      } catch (e) {
+        // log but don't rethrow
+        console.error('Error showing notification in SW:', e);
+      }
+    })();
+
+    try { await Promise.all([notifyPromise, showPromise]); } catch (e) { /* ignore */ }
+  })());
+});
+
+// Notification Click Event
+self.addEventListener('notificationclick', (event) => {
+  console.log('Service Worker: Notification clicked', event);
+  
+  event.notification.close();
+
+  // Handle action buttons
+  if (event.action === 'close') {
+    return;
+  }
+
+  // Open the app when notification is clicked
+  event.waitUntil(
+    clients.matchAll({ type: 'window', includeUncontrolled: true })
+      .then((clientList) => {
+        // Check if there's already a window/tab open
+        for (let i = 0; i < clientList.length; i++) {
+          const client = clientList[i];
+          if (client.url.includes(self.location.origin) && 'focus' in client) {
+            return client.focus();
+          }
+        }
+        // If no window is open, open a new one
+        if (clients.openWindow) {
+          const url = event.notification.data?.url || '/';
+          return clients.openWindow(url);
+        }
+      })
+  );
+});
+
+// Background Sync (for offline actions)
+self.addEventListener('sync', (event) => {
+  console.log('Service Worker: Background sync', event);
+  if (event.tag === 'sync-bookings') {
+    event.waitUntil(syncBookings());
+  }
+});
+
+async function syncBookings() {
+  // Implement booking sync logic here
+  console.log('Syncing bookings...');
+}
+
+// Message handler - accept admin commands from pages
+self.addEventListener('message', (event) => {
+  try {
+    const msg = event && event.data ? event.data : null;
+    if (!msg || !msg.type) return;
+
+    if (msg.type === 'FORCE_RELOAD' || msg.type === 'FORCE_UPDATE') {
+      // Attempt to navigate/reload all client windows so they pick up latest assets
+      event.waitUntil((async () => {
+        try {
+          const allClients = await clients.matchAll({ type: 'window', includeUncontrolled: true });
+          for (const client of allClients) {
+            try {
+              // Try to navigate the client to its current URL (forces reload)
+              if (client.navigate) {
+                await client.navigate(client.url);
+              } else {
+                // Fallback: send a message to the client and let it handle reload
+                client.postMessage({ type: 'RELOAD_REQUEST', reason: msg.type });
+              }
+            } catch (e) {
+              try { client.postMessage({ type: 'RELOAD_REQUEST', reason: msg.type }); } catch (err) { /* ignore */ }
+            }
+          }
+        } catch (e) {
+          // ignore
+        }
+      })());
+    }
+  } catch (e) {
+    // ignore malformed messages
+  }
+});

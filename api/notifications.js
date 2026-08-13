@@ -1,0 +1,531 @@
+import express from 'express'
+import webpush from 'web-push'
+import { connectToDatabase } from '../lib/mongo.js'
+import {
+  storePushSubscription,
+  removePushSubscription,
+  getUserSubscriptions,
+  getAllActiveSubscriptions,
+  storeNotification,
+  getUserNotifications,
+  getUnreadNotificationCount,
+  markNotificationAsRead,
+  markAllNotificationsAsRead
+} from '../lib/notificationService.js'
+
+const router = express.Router()
+
+// VAPID keys must be generated as a matching pair (for example with
+// `npx web-push generate-vapid-keys`) and configured in the environment.
+const VAPID_PUBLIC_KEY = String(process.env.VAPID_PUBLIC_KEY || '').trim()
+const VAPID_PRIVATE_KEY = String(process.env.VAPID_PRIVATE_KEY || '').trim()
+let pushNotificationsEnabled = false
+
+if (VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY) {
+  try {
+    webpush.setVapidDetails(
+      process.env.VAPID_SUBJECT || 'mailto:support@msecconnect.edu',
+      VAPID_PUBLIC_KEY,
+      VAPID_PRIVATE_KEY
+    )
+    pushNotificationsEnabled = true
+  } catch (error) {
+    console.error(`⚠️ Push notifications disabled: invalid VAPID configuration (${error.message})`)
+  }
+} else {
+  console.warn('⚠️ Push notifications disabled: VAPID_PUBLIC_KEY and VAPID_PRIVATE_KEY are required')
+}
+
+const requirePushConfiguration = (res) => {
+  if (pushNotificationsEnabled) return true
+  res.status(503).json({
+    success: false,
+    message: 'Push notifications are not configured on the server'
+  })
+  return false
+}
+
+// Subscribe to push notifications (status -> active)
+router.post('/subscribe', async (req, res) => {
+  try {
+    if (!requirePushConfiguration(res)) return
+
+    const { subscription, userEmail } = req.body
+
+    if (!subscription || !userEmail) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Subscription and userEmail are required'
+      })
+    }
+
+    const result = await storePushSubscription(subscription, userEmail)
+
+    if (result.success) {
+      // Welcome ping (best-effort)
+      try {
+        await webpush.sendNotification(
+          subscription,
+          JSON.stringify({
+            title: 'MSEC Connect',
+            body: '🔔 Notifications enabled! You will receive updates here.',
+            icon: '/images/android-chrome-192x192.png',
+            badge: '/images/favicon-32x32.png',
+            tag: 'welcome',
+            data: { url: '/' }
+          })
+        )
+      } catch {}
+
+      res.json({ success: true, message: 'Subscription active' })
+    } else {
+      res.status(500).json({ success: false, message: 'Failed to store subscription' })
+    }
+  } catch (error) {
+    console.error('Subscribe error:', error)
+    res.status(500).json({ success: false, message: 'Internal server error' })
+  }
+})
+
+// Deactivate subscription(s) during logout (status -> expired)
+router.post('/deactivate', async (req, res) => {
+  try {
+    const { endpoint, userEmail } = req.body
+
+    if (!userEmail) {
+      return res.status(400).json({ success: false, message: 'userEmail is required' })
+    }
+
+    const mongoose = await connectToDatabase()
+    const db = mongoose.connection.db
+    const collection = db.collection('push_subscriptions')
+
+    const filter = endpoint ? { userEmail, 'subscription.endpoint': endpoint } : { userEmail }
+
+    const result = await collection.updateMany(
+      filter,
+      { $set: { active: false, status: 'expired', statusUpdatedAt: new Date(), deactivatedAt: new Date(), deactivatedReason: 'user_logout' } }
+    )
+
+    return res.json({ success: true, modified: result.modifiedCount })
+  } catch (error) {
+    console.error('Deactivate subscription error:', error)
+    res.status(500).json({ success: false, message: 'Internal server error' })
+  }
+})
+
+// Unsubscribe from push notifications (specific endpoint -> expired)
+router.post('/unsubscribe', async (req, res) => {
+  try {
+    const { endpoint, userEmail } = req.body
+
+    if (!endpoint || !userEmail) {
+      return res.status(400).json({ success: false, message: 'Endpoint and userEmail are required' })
+    }
+
+    await removePushSubscription(endpoint, userEmail)
+
+    res.json({ success: true, message: 'Unsubscribed (expired) successfully' })
+  } catch (error) {
+    console.error('Unsubscribe error:', error)
+    res.status(500).json({ success: false, message: 'Internal server error' })
+  }
+})
+
+// Send notification to specific user (only active status)
+router.post('/send', async (req, res) => {
+  try {
+    if (!requirePushConfiguration(res)) return
+
+    const { userEmail, title, body, url, icon, badge } = req.body
+
+    if (!userEmail || !title || !body) {
+      return res.status(400).json({ success: false, message: 'userEmail, title, and body are required' })
+    }
+
+    // Get user's subscriptions
+    const { subscriptions } = await getUserSubscriptions(userEmail)
+
+    const activeSubs = (subscriptions || []).filter(s => s.active === true || s.status === 'active')
+    if (activeSubs.length === 0) {
+      return res.status(404).json({ success: false, message: 'No active subscriptions found for this user' })
+    }
+
+    const payload = JSON.stringify({
+      title,
+      body,
+      icon: icon || '/images/android-chrome-192x192.png',
+      badge: badge || '/images/favicon-32x32.png',
+      tag: 'msec-notification',
+      data: { url: url || '/' }
+    })
+
+    const promises = activeSubs.map(async (sub) => {
+      try {
+        await webpush.sendNotification(sub.subscription, payload)
+        return { success: true, endpoint: sub.subscription.endpoint }
+      } catch (error) {
+        // Expire invalid subscriptions
+        if (error.statusCode === 410 || error.statusCode === 404) {
+          await removePushSubscription(sub.subscription.endpoint, userEmail)
+        }
+        return { success: false, endpoint: sub.subscription.endpoint, error: error.message }
+      }
+    })
+
+    const results = await Promise.all(promises)
+
+    // Store notification in database
+    await storeNotification({ userEmail, title, body, url, icon, badge })
+
+    res.json({ success: true, message: 'Notifications sent', results })
+  } catch (error) {
+    console.error('Send notification error:', error)
+    res.status(500).json({ success: false, message: 'Internal server error' })
+  }
+})
+
+// Broadcast notification to all users (only active status)
+router.post('/broadcast', async (req, res) => {
+  try {
+    if (!requirePushConfiguration(res)) return
+
+    // Only admin can broadcast
+    const userRole = req.user ? req.user.role : ''
+    if (!['admin', 'super_admin'].includes(userRole)) {
+      return res.status(403).json({ success: false, message: 'Only admin can broadcast notifications' })
+    }
+
+    const { title, body, url, icon, badge } = req.body
+
+    if (!title || !body) {
+      return res.status(400).json({ success: false, message: 'title and body are required' })
+    }
+
+    const { subscriptions } = await getAllActiveSubscriptions()
+    const activeSubs = (subscriptions || []).filter(s => s.active === true || s.status === 'active')
+
+    if (!activeSubs || activeSubs.length === 0) {
+      return res.status(404).json({ success: false, message: 'No active subscriptions found' })
+    }
+
+    const payload = JSON.stringify({
+      title,
+      body,
+      icon: icon || '/images/android-chrome-192x192.png',
+      badge: badge || '/images/favicon-32x32.png',
+      tag: 'msec-broadcast',
+      data: { url: url || '/' }
+    })
+
+    const promises = activeSubs.map(async (sub) => {
+      try {
+        await webpush.sendNotification(sub.subscription, payload)
+        await storeNotification({ userEmail: sub.userEmail, title, body, url, icon, badge, broadcast: true })
+        return { success: true }
+      } catch (error) {
+        if (error.statusCode === 410 || error.statusCode === 404) {
+          await removePushSubscription(sub.subscription.endpoint, sub.userEmail)
+        }
+        return { success: false, error: error.message }
+      }
+    })
+
+    const results = await Promise.all(promises)
+    const successCount = results.filter(r => r.success).length
+
+    res.json({ success: true, message: `Broadcast sent to ${successCount} of ${activeSubs.length} subscribers`, results })
+  } catch (error) {
+    console.error('Broadcast error:', error)
+    res.status(500).json({ success: false, message: 'Internal server error' })
+  }
+})
+
+// Get user's notifications
+router.get('/user/:email', async (req, res) => {
+  try {
+    const { email } = req.params
+    const limit = parseInt(req.query.limit) || 50
+
+    const result = await getUserNotifications(email, limit)
+
+    if (result.success) {
+      res.json({ 
+        success: true, 
+        notifications: result.notifications 
+      })
+    } else {
+      res.status(500).json({ 
+        success: false, 
+        message: 'Failed to get notifications' 
+      })
+    }
+  } catch (error) {
+    console.error('Get notifications error:', error)
+    res.status(500).json({ 
+      success: false, 
+      message: 'Internal server error' 
+    })
+  }
+})
+
+// Mark notification as read. The web client uses PATCH, while PUT remains
+// supported for backwards compatibility with older clients.
+const handleMarkNotificationAsRead = async (req, res) => {
+  try {
+    const { id } = req.params
+
+    const result = await markNotificationAsRead(id, req.headers['x-user-email'])
+
+    if (result.success) {
+      res.json({ 
+        success: true, 
+        message: 'Notification marked as read' 
+      })
+    } else {
+      res.status(500).json({ 
+        success: false, 
+        message: 'Failed to mark notification as read' 
+      })
+    }
+  } catch (error) {
+    console.error('Mark as read error:', error)
+    res.status(500).json({ 
+      success: false, 
+      message: 'Internal server error'
+    })
+  }
+}
+
+// Keep this static route before /:id/read so "read-all" is not interpreted as
+// a notification id. The authenticated email header is the source of truth.
+router.patch('/read-all', async (req, res) => {
+  try {
+    const userEmail = String(req.headers['x-user-email'] || '').trim().toLowerCase()
+    if (!userEmail) {
+      return res.status(401).json({ success: false, message: 'Authentication required' })
+    }
+
+    const result = await markAllNotificationsAsRead(userEmail)
+    if (!result.success) {
+      return res.status(500).json({ success: false, message: result.error || 'Unable to mark notifications as read' })
+    }
+
+    return res.json({
+      success: true,
+      modifiedCount: result.modifiedCount || 0,
+      unreadCount: 0
+    })
+  } catch (error) {
+    console.error('Mark all as read error:', error)
+    return res.status(500).json({ success: false, message: 'Internal server error' })
+  }
+})
+
+router.put('/:id/read', handleMarkNotificationAsRead)
+router.patch('/:id/read', handleMarkNotificationAsRead)
+
+// Identify which user owns a browser push endpoint.
+router.post('/subscription-check', async (req, res) => {
+  try {
+    const endpoint = String(req.body?.endpoint || '').trim()
+    if (!endpoint) {
+      return res.status(400).json({ success: false, message: 'endpoint is required' })
+    }
+
+    const mongoose = await connectToDatabase()
+    const subscription = await mongoose.connection.db.collection('push_subscriptions').findOne(
+      { 'subscription.endpoint': endpoint },
+      { projection: { userEmail: 1, active: 1, status: 1 } }
+    )
+
+    if (!subscription) return res.json({ success: true, found: false })
+
+    return res.json({
+      success: true,
+      found: true,
+      userEmail: subscription.userEmail,
+      active: subscription.active === true || subscription.status === 'active'
+    })
+  } catch (error) {
+    console.error('Subscription check error:', error)
+    return res.status(500).json({ success: false, message: 'Internal server error' })
+  }
+})
+
+// Delete notification permanently
+router.delete('/:id', async (req, res) => {
+  try {
+    const { id } = req.params
+
+    if (!id) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'Notification ID is required' 
+      })
+    }
+
+    const mongoose = await connectToDatabase()
+    const db = mongoose.connection.db
+    const ObjectId = (await import('mongodb')).ObjectId
+
+    const collection = db.collection('notifications')
+    const userEmail = String(req.headers['x-user-email'] || '').trim()
+    const query = { _id: new ObjectId(id) }
+    if (userEmail) query.userEmail = { $regex: `^${userEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' }
+    const result = await collection.deleteOne(query)
+
+    if (result.deletedCount > 0) {
+      res.json({ 
+        success: true, 
+        message: 'Notification deleted' 
+      })
+    } else {
+      res.status(404).json({ 
+        success: false, 
+        message: 'Notification not found' 
+      })
+    }
+  } catch (error) {
+    console.error('Delete notification error:', error)
+    res.status(500).json({ 
+      success: false, 
+      message: 'Internal server error' 
+    })
+  }
+})
+
+// Get VAPID public key
+router.get('/vapid-public-key', (req, res) => {
+  if (!requirePushConfiguration(res)) return
+  res.json({ success: true, publicKey: VAPID_PUBLIC_KEY })
+})
+
+// Get unread notification count (used by Header bell)
+router.get('/', async (req, res, next) => {
+  if (req.query.action === 'count') {
+    try {
+      const userEmail = req.headers['x-user-email']
+      if (!userEmail) return res.json({ success: true, unreadCount: 0 })
+      const result = await getUnreadNotificationCount(userEmail)
+      return res.json({ success: result.success, unreadCount: result.unreadCount || 0 })
+    } catch (err) { return res.json({ success: true, unreadCount: 0 }) }
+  }
+  next()
+})
+
+// Get notifications for a user (query param)
+router.get('/', async (req, res) => {
+  try {
+    // Always prefer the authenticated request header. This prevents one user
+    // from reading another user's notifications by changing a query string.
+    const userEmail = req.headers['x-user-email'] || req.query.userEmail
+    const limit = parseInt(req.query.limit) || 50
+
+    if (!userEmail) {
+      return res.status(400).json({ success: false, message: 'userEmail is required' })
+    }
+
+    const result = await getUserNotifications(userEmail, limit)
+
+    if (result.success) {
+      res.json({ 
+        success: true, 
+        notifications: result.notifications 
+      })
+    } else {
+      res.status(500).json({ 
+        success: false, 
+        message: 'Failed to get notifications' 
+      })
+    }
+  } catch (error) {
+    console.error('Get notifications error:', error)
+    res.status(500).json({ 
+      success: false, 
+      message: 'Internal server error' 
+    })
+  }
+})
+
+// Approve or reject staff account request
+router.post('/approve-staff', async (req, res) => {
+  try {
+    const { notificationId, staffId, approved } = req.body
+
+    if (!notificationId || !staffId || approved === undefined) {
+      return res.status(400).json({ 
+        success: false, 
+        message: 'notificationId, staffId, and approved are required' 
+      })
+    }
+
+    const mongoose = await connectToDatabase()
+    const db = mongoose.connection.db
+    const ObjectId = (await import('mongodb')).ObjectId
+
+    // Get the notification to find staff email
+    const notifCollection = db.collection('notifications')
+    const hodNotification = await notifCollection.findOne({ _id: new ObjectId(notificationId) })
+    
+    if (!hodNotification) {
+      return res.status(404).json({ success: false, message: 'Notification not found' })
+    }
+
+    const staffEmail = hodNotification.data?.staffEmail
+
+    // Update HOD's notification status
+    await notifCollection.updateOne(
+      { _id: new ObjectId(notificationId) },
+      { 
+        $set: { 
+          'data.status': approved ? 'approved' : 'rejected',
+          'data.processedAt': new Date(),
+          read: true,
+          readAt: new Date()
+        } 
+      }
+    )
+
+    // Update staff's own notification
+    if (staffEmail) {
+      await notifCollection.updateOne(
+        { 
+          userEmail: staffEmail,
+          type: 'staff_account_request',
+          'data.staffEmail': staffEmail
+        },
+        { 
+          $set: { 
+            'data.status': approved ? 'approved' : 'rejected',
+            'data.processedAt': new Date(),
+            title: approved ? 'Account Approved' : 'Account Rejected',
+            body: approved 
+              ? 'Your staff account has been approved by HOD' 
+              : 'Your staff account request was rejected',
+            read: false  // Keep unread so staff sees the update
+          } 
+        }
+      )
+    }
+
+    if (!approved) {
+      // Delete the staff account
+      const usersCollection = db.collection('users')
+      await usersCollection.deleteOne({ _id: new ObjectId(staffId) })
+    }
+
+    res.json({ 
+      success: true, 
+      message: approved ? 'Staff account approved' : 'Staff account rejected' 
+    })
+  } catch (error) {
+    console.error('Approve/reject staff error:', error)
+    res.status(500).json({ 
+      success: false, 
+      message: 'Internal server error' 
+    })
+  }
+})
+
+export default router

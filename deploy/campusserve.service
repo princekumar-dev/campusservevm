@@ -1,0 +1,32 @@
+[Unit]
+Description=CampusServe web application
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=campusserve
+Group=campusserve
+WorkingDirectory=/opt/campusserve/current
+EnvironmentFile=/etc/campusserve/campusserve.env
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+KillSignal=SIGTERM
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+UMask=0027
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
