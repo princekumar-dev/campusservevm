@@ -1,5 +1,5 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { SystemSettings, AuditLog } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { SystemSettings, AuditLog } from '../db/index.js'
 import { DEFAULT_SYSTEM_SETTINGS, getSystemSettings, invalidateSystemSettingsCache, sanitizeSystemSettings } from '../lib/systemSettings.js'
 
 export default async function handler(req, res) {
@@ -22,11 +22,14 @@ export default async function handler(req, res) {
     if (!updates.institutions || updates.institutions.length !== 4 || institutionIds.size !== 4 || invalidInstitution) {
       return res.status(400).json({ success: false, error: 'Complete the name, email domain, and document details for all four institutions' })
     }
-    const settings = await SystemSettings.findOneAndUpdate(
-      { key: 'global' },
-      { $set: { ...DEFAULT_SYSTEM_SETTINGS, ...updates, updatedBy: req.user.name || req.user.email, updatedAt: new Date() } },
-      { new: true, upsert: true, setDefaultsOnInsert: true }
-    ).lean()
+    const existing = await SystemSettings.findOne({ key: 'global' })
+    const updateData = { ...DEFAULT_SYSTEM_SETTINGS, ...updates, updatedBy: req.user.name || req.user.email, updatedAt: new Date() }
+    if (existing) {
+      await SystemSettings.updateOne({ id: existing.id }, { $set: updateData })
+    } else {
+      await SystemSettings.create({ key: 'global', ...updateData })
+    }
+    const settings = await SystemSettings.findOne({ key: 'global' })
     invalidateSystemSettingsCache()
     await AuditLog.create({
       entityType: 'SYSTEM_SETTINGS', entityId: 'global', action: 'UPDATED',

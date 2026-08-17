@@ -1,7 +1,6 @@
-import { connectToDatabase } from '../lib/mongo.js'
+import { connectToDatabase } from '../lib/pg.js'
 import { requireGateLocation } from '../lib/gateGeofence.js'
-import { GoodsReceipt, PurchaseOrder, DeliverySchedule, User, ServiceRequest } from '../models.js'
-import { isValidObjectId } from 'mongoose'
+import { GoodsReceipt, PurchaseOrder, DeliverySchedule, User, ServiceRequest } from '../db/index.js'
 import { storeNotification } from '../lib/notificationService.js'
 import { getProductId } from '../lib/productId.js'
 import { canReceivePo, getPoReceivingBlockReason } from '../lib/poReceiving.js'
@@ -18,7 +17,7 @@ export default async function handler(req, res) {
 
   const actorId = req.user ? req.user.id : (req.headers['x-user-id'] || 'system')
   const actorRole = req.user ? req.user.role : (req.headers['x-user-role'] || '')
-  const actor = req.user || (isValidObjectId(actorId) ? await User.findById(actorId).lean() : null)
+  const actor = req.user || await User.findById(actorId)
   const actorName = actor ? actor.name : 'Unknown'
 
   try {
@@ -30,10 +29,10 @@ export default async function handler(req, res) {
         return res.status(403).json({ success: false, error: 'You are not authorized to view goods receipts' })
       }
       if (id) {
-        const grn = await GoodsReceipt.findById(id).lean()
+        const grn = await GoodsReceipt.findById(id)
         if (!grn) return res.status(404).json({ success: false, error: 'GRN not found' })
         if (actorRole === 'manager') {
-          const ownedPo = await PurchaseOrder.exists({ _id: grn.poId, createdById: actorId })
+          const ownedPo = await PurchaseOrder.exists({ id: grn.poId, createdById: actorId })
           if (!ownedPo) return res.status(403).json({ success: false, error: 'This GRN is not assigned to you' })
         }
         return res.json({ success: true, data: grn })
@@ -43,21 +42,19 @@ export default async function handler(req, res) {
       if (deliveryId) filter.deliveryScheduleId = deliveryId
       if (req.query.grnType) filter.grnType = req.query.grnType
       if (actorRole === 'manager') {
-        const ownedPoIds = await PurchaseOrder.distinct('_id', { createdById: actorId })
+        const ownedPoIds = await PurchaseOrder.distinct('id', { createdById: actorId })
         filter.poId = filter.poId
           ? { $in: ownedPoIds.filter(ownedId => String(ownedId) === String(filter.poId)) }
           : { $in: ownedPoIds }
       }
-      const grns = await GoodsReceipt.find(filter).select('-receiptEvidence.url -damageEvidence.url').sort({ createdAt: -1 }).lean()
+      const grns = await GoodsReceipt.find(filter, { sort: { createdAt: -1 } })
       grns.forEach(grn => {
         grn.hasReceiptEvidence = Boolean(grn.receiptEvidence?.name)
         grn.hasDamageEvidence = Boolean(grn.damageEvidence?.name)
       })
       const poIds = [...new Set(grns.map(grn => String(grn.poId || '')).filter(Boolean))]
       const purchaseOrders = poIds.length
-        ? await PurchaseOrder.find({ _id: { $in: poIds } })
-          .select('poNumber vendorName status grandTotal expectedDeliveryDate deliveryLocation createdAt closedAt items serviceExecution.expenses serviceExecution.workEvidence invoice')
-          .lean()
+        ? await PurchaseOrder.find({ id: { $in: poIds } })
         : []
       return res.json({ success: true, data: grns, purchaseOrders, total: grns.length })
     }
@@ -149,7 +146,7 @@ export default async function handler(req, res) {
 
         // Find PO item and check cumulative
         const poItem = po.items.find(pi =>
-          (item.poItemId && String(pi._id) === String(item.poItemId)) ||
+          (item.poItemId && String(pi.id) === String(item.poItemId)) ||
           (!item.poItemId && pi.description === item.poItemDescription)
         )
         if (!poItem) {
@@ -197,7 +194,7 @@ export default async function handler(req, res) {
         processedItems.push({
           ...item,
           productId: getProductId(poItem),
-          poItemId: String(poItem._id),
+          poItemId: String(poItem.id),
           quantityDeliveredNow: deliveredNow,
           quantityAcceptedNow: acceptedNow,
           quantityDamaged: damaged,
@@ -245,7 +242,7 @@ export default async function handler(req, res) {
       // A final receipt is the terminal PO event, regardless of whether the
       // receiving screen was opened from the printed PO QR or manually.
       const closesPo = grnType === 'FINAL'
-      const grn = new GoodsReceipt({
+      const grn = await GoodsReceipt.create({
         grnNumber, poId: bodyPoId, poNumber: po.poNumber, deliveryScheduleId,
         grnType, status: 'FINALIZED', receivedBy: receiptActorId, receivedByName: receiptActorName,
         source: qrToken ? 'PO_QR' : 'MANUAL',
@@ -256,7 +253,6 @@ export default async function handler(req, res) {
         receiptEvidence: validatedReceiptEvidence,
         damageEvidence: validatedDamageEvidence
       })
-      await grn.save()
 
       // Update PO status
       const oldPoStatus = po.status
@@ -271,7 +267,10 @@ export default async function handler(req, res) {
           : `${grnType} GRN created: ${grnNumber}`,
         createdAt: new Date()
       })
-      await po.save()
+      await PurchaseOrder.updateOne({ id: po.id }, {
+        $set: { status: po.status, items: po.items },
+        $push: { statusHistory: { $each: po.statusHistory } }
+      })
 
       // A request-backed PO completes the originating request at the same time.
       if (closesPo && po.requestId) {
@@ -288,7 +287,13 @@ export default async function handler(req, res) {
             actorName: receiptActorName,
             comment: `Purchase order ${po.poNumber} closed after successful QR receiving (${grnNumber})`
           })
-          await serviceRequest.save()
+          await ServiceRequest.updateOne(
+            { id: serviceRequest.id },
+            {
+              $set: { status: 'CLOSED', currentOwnerRole: null, closedAt: new Date() },
+              $push: { statusHistory: { $each: serviceRequest.statusHistory } }
+            }
+          )
         }
       }
 
@@ -299,23 +304,27 @@ export default async function handler(req, res) {
           const oldDsStatus = ds.status
           ds.status = grnType === 'FINAL' ? 'FULLY_RECEIVED' : 'PARTIALLY_RECEIVED'
           ds.statusHistory.push({ oldStatus: oldDsStatus, newStatus: ds.status, actorId: receiptActorId, actorName: receiptActorName, comment: `${grnType} GRN recorded`, createdAt: new Date() })
-          await ds.save()
+          await DeliverySchedule.updateOne(
+            { id: ds.id },
+            {
+              $set: { status: ds.status },
+              $push: { statusHistory: { $each: ds.statusHistory } }
+            }
+          )
         }
       }
 
       // Make gate-created receipts immediately visible to the responsible
       // managers through their notification bell and the shared GRN section.
       if (qrToken) {
-        const managers = await User.find({ role: { $in: ['manager', 'super_admin'] }, isActive: true })
-          .select('email')
-          .lean()
+        const managers = await User.find({ role: { $in: ['manager', 'super_admin'] }, isActive: true }, { select: 'email' })
         await Promise.allSettled(managers.map(manager => storeNotification({
           userEmail: manager.email,
           title: `Gate GRN created: ${grnNumber}`,
           body: `${po.poNumber} from ${po.vendorName} was manually verified at the gate.`,
           url: '/grn',
           type: 'gate_grn_created',
-          data: { grnId: grn._id, poId: po._id, poNumber: po.poNumber }
+          data: { grnId: grn.id, poId: po.id, poNumber: po.poNumber }
         })))
       }
 
@@ -327,8 +336,8 @@ export default async function handler(req, res) {
       const grn = await GoodsReceipt.findById(id)
       if (!grn) return res.status(404).json({ success: false, error: 'GRN not found' })
       if (grn.status === 'FINALIZED') return res.status(400).json({ success: false, error: 'GRN already finalized' })
+      await GoodsReceipt.updateOne({ id: grn.id }, { $set: { status: 'FINALIZED' } })
       grn.status = 'FINALIZED'
-      await grn.save()
       return res.json({ success: true, data: grn })
     }
 

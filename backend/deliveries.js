@@ -1,5 +1,5 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { DeliverySchedule, PurchaseOrder, GateEntry, User, DeliveryPerson, Vehicle } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { DeliverySchedule, PurchaseOrder, GateEntry, User, DeliveryPerson, Vehicle } from '../db/index.js'
 import crypto from 'crypto'
 import { addProductIds } from '../lib/productId.js'
 import { canReceivePo, getPoReceivingBlockReason } from '../lib/poReceiving.js'
@@ -16,7 +16,7 @@ export default async function handler(req, res) {
 
   const actorId = req.user ? req.user.id : (req.headers['x-user-id'] || 'system')
   const userRole = req.user ? req.user.role : (req.headers['x-user-role'] || '')
-  const actor = req.user || await User.findById(actorId).lean()
+  const actor = req.user || await User.findById(actorId)
   const actorName = actor ? actor.name : 'Unknown'
 
   const pushHistory = (ds, oldStatus, newStatus, comment) => {
@@ -29,10 +29,9 @@ export default async function handler(req, res) {
     // ── GET /api/deliveries ────────────────────────────────────────────────────
     if (req.method === 'GET') {
       if (id) {
-        const ds = await DeliverySchedule.findById(id).lean()
+        const ds = await DeliverySchedule.findById(id)
         if (!ds) return res.status(404).json({ success: false, error: 'Delivery not found' })
-        // Fetch gate entries
-        const entries = await GateEntry.find({ deliveryScheduleId: id }).sort({ entryTime: -1 }).lean()
+        const entries = await GateEntry.find({ deliveryScheduleId: id }, { sort: { entryTime: -1 } })
         return res.json({ success: true, data: ds, gateEntries: entries })
       }
 
@@ -42,14 +41,14 @@ export default async function handler(req, res) {
         const todayEnd = new Date(); todayEnd.setHours(23, 59, 59, 999)
         const deliveries = await DeliverySchedule.find({
           scheduledDate: { $gte: todayStart, $lte: todayEnd }
-        }).sort({ scheduledDate: 1 }).lean()
+        }, { sort: { scheduledDate: 1 } })
         return res.json({ success: true, data: deliveries })
       }
 
       const filter = {}
       if (req.query.poId) filter.poId = req.query.poId
       if (req.query.status) filter.status = req.query.status
-      const deliveries = await DeliverySchedule.find(filter).sort({ scheduledDate: -1 }).lean()
+      const deliveries = await DeliverySchedule.find(filter, { sort: { scheduledDate: -1 } })
       return res.json({ success: true, data: deliveries, total: deliveries.length })
     }
 
@@ -60,7 +59,7 @@ export default async function handler(req, res) {
         return res.status(400).json({ success: false, error: 'poId, scheduledDate, and deliveryLocation are required' })
       }
 
-      const po = await PurchaseOrder.findById(poId).lean()
+      const po = await PurchaseOrder.findById(poId)
       if (!po) return res.status(404).json({ success: false, error: 'PO not found' })
       if (!canReceivePo(po)) {
         return res.status(409).json({ success: false, error: getPoReceivingBlockReason(po) })
@@ -68,11 +67,11 @@ export default async function handler(req, res) {
 
       let dpName = '', dpPhone = '', vNumber = ''
       if (deliveryPersonId) {
-        const dp = await DeliveryPerson.findById(deliveryPersonId).lean()
+        const dp = await DeliveryPerson.findById(deliveryPersonId)
         if (dp) { dpName = dp.name; dpPhone = dp.phone }
       }
       if (vehicleId) {
-        const v = await Vehicle.findById(vehicleId).lean()
+        const v = await Vehicle.findById(vehicleId)
         if (v) vNumber = v.vehicleNumber
       }
 
@@ -83,7 +82,7 @@ export default async function handler(req, res) {
       const scheduledItems = Array.isArray(items) && items.length
         ? items.map(item => {
             const poItem = poItemsWithIds.find(candidate =>
-              String(candidate._id) === String(item.poItemId || '') ||
+              String(candidate.id) === String(item.poItemId || '') ||
               candidate.productId === item.productId ||
               candidate.description === item.description
             )
@@ -96,7 +95,7 @@ export default async function handler(req, res) {
             unit: item.unit
           }))
 
-      const ds = new DeliverySchedule({
+      const ds = await DeliverySchedule.create({
         deliveryNumber, poId, poNumber: po.poNumber, vendorId: po.vendorId, vendorName: po.vendorName,
         deliveryPersonId: deliveryPersonId || null, deliveryPersonName: dpName, deliveryPersonPhone: dpPhone,
         vehicleId: vehicleId || null, vehicleNumber: vNumber,
@@ -105,7 +104,6 @@ export default async function handler(req, res) {
         status: 'SCHEDULED',
         statusHistory: [{ oldStatus: '', newStatus: 'SCHEDULED', actorId, actorName, comment: 'Delivery scheduled', createdAt: new Date() }]
       })
-      await ds.save()
       return res.status(201).json({ success: true, data: ds })
     }
 
@@ -154,14 +152,28 @@ export default async function handler(req, res) {
         ds.status = 'EXIT_RECORDED'
         pushHistory(ds, oldStatus, 'EXIT_RECORDED', 'Vehicle exit recorded by gate')
         // Update gate entry exit time
-        const lastEntry = await GateEntry.findOne({ deliveryScheduleId: id, decision: 'APPROVED' }).sort({ entryTime: -1 })
-        if (lastEntry) { lastEntry.exitTime = new Date(); await lastEntry.save() }
+        const lastEntry = await GateEntry.findOne({ deliveryScheduleId: id, decision: 'APPROVED' }, { sort: { entryTime: -1 } })
+        if (lastEntry) { await GateEntry.updateOne({ id: lastEntry.id }, { $set: { exitTime: new Date() } }) }
       }
       else {
         return res.status(400).json({ success: false, error: 'Invalid action' })
       }
 
-      await ds.save()
+      await DeliverySchedule.updateOne({ id: ds.id }, {
+        $set: {
+          qrToken: ds.qrToken,
+          qrTokenHash: ds.qrTokenHash,
+          backupCode: ds.backupCode,
+          backupCodeHash: ds.backupCodeHash,
+          passValidFrom: ds.passValidFrom,
+          passValidUntil: ds.passValidUntil,
+          passRevoked: ds.passRevoked,
+          passUsageCount: ds.passUsageCount,
+          scheduledDate: ds.scheduledDate,
+          status: ds.status
+        },
+        $push: { statusHistory: { $each: ds.statusHistory } }
+      })
       return res.json({ success: true, data: ds })
     }
 

@@ -50,6 +50,7 @@ const AccountsDashboard = lazy(() => import('./pages/AccountsDashboard'))
 const AccountsPayments = lazy(() => import('./pages/AccountsPayments'))
 const ManagerDeliveryPersons = lazy(() => import('./pages/ManagerDeliveryPersons'))
 const ManagerVehicles = lazy(() => import('./pages/ManagerVehicles'))
+const Stock = lazy(() => import('./pages/Stock'))
 
 // Root route handler
 const RootRedirect = () => {
@@ -236,34 +237,45 @@ function AppContent() {
   }, [isAuthPage, location.pathname])
 
   useEffect(() => {
+    let wheelFrame = null
     const handleWheel = (event) => {
       if (!event.deltaY || event.ctrlKey) return
-
-      // Leave independently scrollable panels, tables and modals alone.
-      let node = event.target instanceof Element ? event.target : null
-      while (node && node !== document.body) {
-        const style = window.getComputedStyle(node)
-        const canScroll = /(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight
-        if (canScroll) return
-        node = node.parentElement
-      }
-
+      // Trackpads can emit many wheel events per frame. The fallback below
+      // inspects computed styles, so run it at most once per paint.
+      if (wheelFrame) return
+      const target = event.target
+      const deltaY = event.deltaY
       const before = window.scrollY
-      const maxScroll = document.documentElement.scrollHeight - window.innerHeight
-      const hasRoom = event.deltaY > 0 ? before < maxScroll : before > 0
-      if (!hasRoom) return
 
-      // Edge/trackpad fallback: intervene only if the browser did not perform
-      // the native window scroll by the next animation frame.
-      requestAnimationFrame(() => {
+      wheelFrame = requestAnimationFrame(() => {
+        wheelFrame = null
+
+        // Leave independently scrollable panels, tables and modals alone.
+        let node = target instanceof Element ? target : null
+        while (node && node !== document.body) {
+          const style = window.getComputedStyle(node)
+          const canScroll = /(auto|scroll)/.test(style.overflowY) && node.scrollHeight > node.clientHeight
+          if (canScroll) return
+          node = node.parentElement
+        }
+
+        const maxScroll = document.documentElement.scrollHeight - window.innerHeight
+        const hasRoom = deltaY > 0 ? before < maxScroll : before > 0
+        if (!hasRoom) return
+
+        // Edge/trackpad fallback: intervene only if the browser did not
+        // perform the native window scroll during this frame.
         if (Math.abs(window.scrollY - before) < 1) {
-          window.scrollBy({ top: event.deltaY, left: 0, behavior: 'auto' })
+          window.scrollBy({ top: deltaY, left: 0, behavior: 'auto' })
         }
       })
     }
 
     window.addEventListener('wheel', handleWheel, { passive: true, capture: true })
-    return () => window.removeEventListener('wheel', handleWheel, { capture: true })
+    return () => {
+      if (wheelFrame) cancelAnimationFrame(wheelFrame)
+      window.removeEventListener('wheel', handleWheel, { capture: true })
+    }
   }, [])
 
   useEffect(() => {
@@ -334,7 +346,7 @@ function AppContent() {
                   <Route path="/requests/:id" element={<ProtectedRoute><RequestDetails /></ProtectedRoute>} />
                   
                   {/* Reports */}
-                  <Route path="/reports" element={<ProtectedRoute allowedRoles={['admin', 'super_admin', 'accounts', 'manager']}><Reports /></ProtectedRoute>} />
+                  <Route path="/reports" element={<ProtectedRoute allowedRoles={['super_admin', 'manager']}><Reports /></ProtectedRoute>} />
                   
                   {/* Admin routes */}
                   <Route path="/admin/users" element={<ProtectedRoute allowedRoles={['super_admin']}><AdminUsers /></ProtectedRoute>} />
@@ -378,6 +390,7 @@ function AppContent() {
                   {/* Manager routes */}
                   <Route path="/manager/delivery-persons" element={<ProtectedRoute allowedRoles={['admin', 'super_admin', 'manager']}><ManagerDeliveryPersons /></ProtectedRoute>} />
                   <Route path="/manager/vehicles" element={<ProtectedRoute allowedRoles={['admin', 'super_admin', 'manager']}><ManagerVehicles /></ProtectedRoute>} />
+                  <Route path="/stock" element={<ProtectedRoute allowedRoles={['admin', 'super_admin', 'manager']}><Stock /></ProtectedRoute>} />
                   
                   {/* Auth routes */}
                   <Route path="/login" element={<RedirectIfAuthenticated><Login /></RedirectIfAuthenticated>} />

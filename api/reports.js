@@ -1,5 +1,5 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { ServiceRequest, User, PurchaseOrder, DeliverySchedule, GateEntry, GoodsReceipt } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { ServiceRequest, ServiceRequestPayment, User, PurchaseOrder, DeliverySchedule, GateEntry, GoodsReceipt } from '../db/index.js'
 
 const finiteAmount = value => {
   const amount = Number(value)
@@ -23,6 +23,7 @@ export default async function handler(req, res) {
       const userId = req.user ? req.user.id : (req.headers['x-user-id'] || '')
       const userRole = req.user ? req.user.role : (req.headers['x-user-role'] || '')
       const userEmail = req.user ? req.user.email : (req.headers['x-user-email'] || '')
+      const institution = req.query.institution || ''
 
       // Build role-scoped filter
       const filter = {}
@@ -38,10 +39,27 @@ export default async function handler(req, res) {
       }
       // admin, accounts, super_admin see all
 
-      const requests = await ServiceRequest.find(filter)
-        .select('status currentOwnerRole category requesterId quotation.grandTotal payments.amount workOrder.technicianId workOrder.technicianName workOrder.status')
-        .lean()
-      const requestIds = requests.map(request => request._id)
+      // Institution filter
+      if (institution) {
+        filter.institution = institution
+      }
+
+      const requests = await ServiceRequest.find(filter, {
+        select: 'status currentOwnerRole category requesterId quotation workOrder institution'
+      })
+      const requestIds = requests.map(request => request.id)
+      const payments = requestIds.length
+        ? await ServiceRequestPayment.find({ requestId: { $in: requestIds } }, { sort: { paidAt: -1 } })
+        : []
+      const paymentsByRequest = new Map()
+      for (const payment of payments) {
+        const rid = String(payment.requestId)
+        if (!paymentsByRequest.has(rid)) paymentsByRequest.set(rid, [])
+        paymentsByRequest.get(rid).push(payment)
+      }
+      for (const request of requests) {
+        request.payments = paymentsByRequest.get(String(request.id)) || []
+      }
       const poFilter = {}
       if (userRole === 'manager') {
         poFilter.createdById = userId
@@ -49,6 +67,12 @@ export default async function handler(req, res) {
         poFilter.requestId = { $in: requestIds }
       } else if (userRole === 'vendor') {
         poFilter.vendorEmail = String(userEmail || '').trim().toLowerCase()
+      }
+      // Purchase orders inherit their institution from their linked request.
+      // Scope them explicitly so the financial cards and department costs do
+      // not include values from another institution.
+      if (institution) {
+        poFilter.requestId = { $in: requestIds }
       }
       const startOfToday = new Date()
       startOfToday.setHours(0, 0, 0, 0)
@@ -63,8 +87,8 @@ export default async function handler(req, res) {
         completedReceipts,
         finalizedGrns,
       ] = await Promise.all([
-        PurchaseOrder.find(poFilter).select('status signedPo.status grandTotal requestId').lean(),
-        User.find({ role: 'technician', isActive: true }).select('name').sort({ name: 1 }).lean(),
+        PurchaseOrder.find(poFilter, { select: 'status signedPo.status grandTotal requestId' }),
+        User.find({ role: 'technician', isActive: true }, { sort: { name: 1 }, select: 'name' }),
         DeliverySchedule.countDocuments({ status: { $in: ['PASS_GENERATED', 'AT_GATE'] } }),
         GateEntry.countDocuments({ entryTime: { $gte: startOfToday }, decision: 'APPROVED' }),
         GateEntry.countDocuments({ entryTime: { $gte: startOfToday }, decision: 'REJECTED' }),
@@ -117,15 +141,15 @@ export default async function handler(req, res) {
 
       const requesterIds = [...new Set(requests.filter(r => r.requesterId).map(r => String(r.requesterId)))]
       const requesterDepartments = requesterIds.length
-        ? await User.find({ _id: { $in: requesterIds } }).select('department').lean()
+        ? await User.find({ id: { $in: requesterIds } }, { select: 'id department' })
         : []
       const departmentByRequester = new Map(
-        requesterDepartments.map(requester => [String(requester._id), requester.department || 'General'])
+        requesterDepartments.map(requester => [String(requester._id || requester.id), requester.department || 'General'])
       )
-      const requestById = new Map(requests.map(request => [String(request._id), request]))
+      const requestById = new Map(requests.map(request => [String(request.id), request]))
 
       technicians.forEach(technician => {
-        techStats[String(technician._id)] = { name: technician.name, assigned: 0, completed: 0 }
+        techStats[String(technician.id)] = { name: technician.name, assigned: 0, completed: 0 }
       })
 
       for (const r of requests) {
@@ -143,7 +167,7 @@ export default async function handler(req, res) {
 
         // Tech stats
         if (r.workOrder && r.workOrder.technicianName) {
-          const techKey = String(r.workOrder.technicianId || `name:${r.workOrder.technicianName}`)
+        const techKey = String(r.workOrder.technicianId || `name:${r.workOrder.technicianName}`)
           if (!techStats[techKey]) {
             techStats[techKey] = { name: r.workOrder.technicianName, assigned: 0, completed: 0 }
           }

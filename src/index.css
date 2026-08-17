@@ -2066,12 +2066,18 @@ body {
 
 /* Purple themed buttons */
 .bg-purple-500:hover,
-.bg-purple-600:hover,
+.bg-purple-600:hover {
+  background-color: #7c3aed !important;
+  color: white !important;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.4) !important;
+  transform: translateY(-1px);
+}
 .bg-violet-500:hover,
 .bg-violet-600:hover {
-  background-color: white !important;
-  color: #8b5cf6 !important;
-  border-color: #8b5cf6 !important;
+  background-color: #7c3aed !important;
+  color: white !important;
+  box-shadow: 0 4px 14px rgba(124, 58, 237, 0.4) !important;
+  transform: translateY(-1px);
 }
 
 /* Pink themed buttons */

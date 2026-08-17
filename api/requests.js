@@ -1,5 +1,5 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { ServiceRequest, User } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { ServiceRequest, User } from '../db/index.js'
 import { calculateSlaDueAt, finalizeRequestWorkflow } from '../lib/workflowEngine.js'
 import { getSystemSettings } from '../lib/systemSettings.js'
 
@@ -22,7 +22,7 @@ export default async function handler(req, res) {
 
       // 1. Fetch single request by ID
       if (id) {
-        const request = await ServiceRequest.findById(id).lean()
+        const request = await ServiceRequest.findById(id)
         if (!request) return res.status(404).json({ success: false, error: 'Request not found' })
         request.institution = request.institution || 'msec'
         request.isEscalated = Boolean(request.slaDueAt && new Date(request.slaDueAt) < new Date() && !['CLOSED', 'REJECTED', 'CANCELLED'].includes(request.status))
@@ -48,19 +48,14 @@ export default async function handler(req, res) {
         filter['workOrder.technicianId'] = userId
       }
 
-      let requestsQuery = ServiceRequest.find(filter).sort({ createdAt: -1 })
+      let requestsOptions = { sort: { createdAt: -1 } }
       if (summary === 'dashboard') {
-        requestsQuery = requestsQuery
-          .select('requestNumber institution title priority status updatedAt createdAt slaDueAt')
-          .limit(8)
+        requestsOptions.select = 'id requestNumber institution title priority status updatedAt createdAt slaDueAt'
+        requestsOptions.limit = 8
       } else {
-        // List screens only render these summary fields. Avoid transferring the
-        // embedded evidence, quotation, invoice, work order, and audit history.
-        requestsQuery = requestsQuery.select(
-          'requestNumber institution title category location priority status requesterId requesterName assignedManagerId assignedManagerName adminAssessment.requirementType currentOwnerRole slaDueAt submittedAt createdAt updatedAt'
-        )
+        requestsOptions.select = 'id requestNumber institution title category location priority status requesterId requesterName assignedManagerId assignedManagerName adminAssessment.requirementType currentOwnerRole slaDueAt submittedAt createdAt updatedAt'
       }
-      const requests = await requestsQuery.lean()
+      const requests = await ServiceRequest.find(filter, requestsOptions)
       const now = Date.now()
       const data = requests.map(item => ({
         ...item,
@@ -77,7 +72,7 @@ export default async function handler(req, res) {
       const { action, id } = req.query
       const actorId = req.user ? req.user.id : (req.headers['x-user-id'] || 'system')
       
-      const actor = req.user || await User.findById(actorId).lean()
+      const actor = req.user || await User.findById(actorId)
       const actorName = actor ? actor.name : 'Unknown User'
 
       // 1. Create New Request
@@ -105,7 +100,7 @@ export default async function handler(req, res) {
           return res.status(400).json({ success: false, error: 'The selected photo could not be saved. Use a JPG, PNG, or WebP image up to 2 MB.' })
         }
 
-        const requester = await User.findById(actorId).lean()
+        const requester = await User.findById(actorId)
         if (!requester) return res.status(404).json({ success: false, error: 'Requester user not found' })
 
         const year = new Date().getFullYear()
@@ -114,7 +109,7 @@ export default async function handler(req, res) {
 
         const status = submitImmediately ? 'SUBMITTED' : 'DRAFT'
 
-        const newRequest = new ServiceRequest({
+        const newRequest = await ServiceRequest.create({
           requestNumber,
           institution: requester.institution || 'msec',
           title,
@@ -131,20 +126,20 @@ export default async function handler(req, res) {
           status,
           currentOwnerRole: submitImmediately ? 'admin' : 'requester',
           slaDueAt: calculateSlaDueAt(priority || 'LOW', status),
-          requesterId: requester._id,
+          requesterId: requester.id,
           requesterName: requester.name,
           requesterEmail: requester.email,
           statusHistory: [{
             oldStatus: '',
             newStatus: status,
-            actorId: requester._id.toString(),
+            actorId: requester.id,
             actorName: requester.name,
             comment: submitImmediately ? 'Request submitted' : 'Request drafted'
           }]
         })
 
         await finalizeRequestWorkflow(newRequest, { id: actorId, name: requester.name, role: userRole })
-        await newRequest.save()
+        await ServiceRequest.updateOne({ id: newRequest.id }, { $set: { currentOwnerRole: newRequest.currentOwnerRole, slaDueAt: newRequest.slaDueAt, isEscalated: newRequest.isEscalated } })
         return res.status(201).json({ success: true, data: newRequest })
       }
 
@@ -268,10 +263,10 @@ export default async function handler(req, res) {
         const { managerId } = req.body
         if (!managerId) return res.status(400).json({ success: false, error: 'Manager ID is required' })
         
-        const manager = await User.findById(managerId).lean()
+        const manager = await User.findById(managerId)
         if (!manager || manager.role !== 'manager') return res.status(404).json({ success: false, error: 'Manager user not found' })
 
-        request.assignedManagerId = manager._id
+        request.assignedManagerId = manager.id
         request.assignedManagerName = manager.name
         request.assignedManagerEmail = manager.email
         request.status = 'ASSIGNED_TO_MANAGER'
@@ -292,7 +287,7 @@ export default async function handler(req, res) {
           return res.status(400).json({ success: false, error: 'Select maintenance, replacement, or new purchase' })
         }
         if (!managerId) return res.status(400).json({ success: false, error: 'Manager is required' })
-        const manager = await User.findById(managerId).lean()
+        const manager = await User.findById(managerId)
         if (!manager || manager.role !== 'manager' || manager.isActive === false) {
           return res.status(404).json({ success: false, error: 'Select an active Purchase Manager' })
         }
@@ -302,7 +297,7 @@ export default async function handler(req, res) {
           assessedBy: actorName,
           assessedAt: new Date()
         }
-        request.assignedManagerId = manager._id
+        request.assignedManagerId = manager.id
         request.assignedManagerName = manager.name
         request.assignedManagerEmail = manager.email
         request.status = 'ASSIGNED_TO_MANAGER'
@@ -390,7 +385,24 @@ export default async function handler(req, res) {
       }
 
       await finalizeRequestWorkflow(request, { id: actorId, name: actorName, role: userRole })
-      await request.save()
+      await ServiceRequest.updateOne({ id: request.id }, {
+        $set: {
+          status: request.status,
+          submittedAt: request.submittedAt,
+          currentOwnerRole: request.currentOwnerRole,
+          slaDueAt: request.slaDueAt,
+          isEscalated: request.isEscalated,
+          closedAt: request.closedAt,
+          assignedManagerId: request.assignedManagerId,
+          assignedManagerName: request.assignedManagerName,
+          assignedManagerEmail: request.assignedManagerEmail,
+          adminAssessment: request.adminAssessment,
+          inspection: request.inspection,
+          requesterVerification: request.requesterVerification,
+          evidence: request.evidence
+        },
+        $push: { statusHistory: { $each: request.statusHistory } }
+      })
       return res.status(200).json({ success: true, data: request })
     }
 
@@ -454,7 +466,22 @@ export default async function handler(req, res) {
         actorName: req.user?.name || 'Requester',
         comment: 'Request details edited'
       })
-      await request.save()
+      await ServiceRequest.updateOne({ id: request.id }, {
+        $set: {
+          title: request.title,
+          category: request.category,
+          location: request.location,
+          assetCode: request.assetCode,
+          priority: request.priority,
+          emergencyReason: request.emergencyReason,
+          requestedItem: request.requestedItem,
+          requestedQuantity: request.requestedQuantity,
+          requestedUnit: request.requestedUnit,
+          description: request.description,
+          evidence: request.evidence
+        },
+        $push: { statusHistory: { $each: request.statusHistory } }
+      })
 
       return res.status(200).json({ success: true, data: request })
     }
@@ -475,7 +502,7 @@ export default async function handler(req, res) {
         return res.status(409).json({ success: false, error: 'Submitted requests cannot be deleted. Edit the request instead.' })
       }
 
-      await ServiceRequest.deleteOne({ _id: request._id })
+      await ServiceRequest.deleteOne({ id: request.id })
       return res.status(200).json({ success: true, message: 'Request deleted successfully' })
     }
 

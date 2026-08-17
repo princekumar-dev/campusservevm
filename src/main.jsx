@@ -86,10 +86,12 @@ if (!rootElement) {
 const root = ReactDOM.createRoot(rootElement)
 
 try {
-  root.render(
-    <React.StrictMode>
-      <App />
-    </React.StrictMode>
+  // Strict Mode intentionally mounts effects twice in development. This app
+  // performs authenticated data loads in those effects, so use a single mount
+  // locally to keep the development server representative and responsive.
+  root.render(import.meta.env.DEV
+    ? <App />
+    : <React.StrictMode><App /></React.StrictMode>
   )
 } catch (error) {
   console.error('Failed to render app:', error)

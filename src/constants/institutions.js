@@ -3,7 +3,7 @@ export const INSTITUTIONS = [
   { id: 'nest', name: 'The Nest School', logo: '/images/thenestschoollogo.webp', tileClass: 'w-full', logoClass: 'h-auto w-[82px]' },
   { id: 'mssm', name: 'MSSM', logo: '/images/mssm.png', tileClass: 'w-full', logoClass: 'h-auto w-[86px]' },
   // Keep the legacy `iic` value so existing users and requests remain valid.
-  { id: 'iic', name: 'IIET', logo: '/images/mseclogo.webp', tileClass: 'w-[76px]', logoClass: 'h-[58px] w-auto' }
+  { id: 'iic', name: 'IIET', logo: '/images/iic.webp', tileClass: 'w-full', logoClass: 'h-auto w-[82px]' }
 ]
 
 export const INSTITUTION_USER_ROLES = ['requester', 'staff', 'hod']

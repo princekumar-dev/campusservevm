@@ -1,5 +1,5 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { ServiceRequest, User } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { ServiceRequest, User } from '../db/index.js'
 import { finalizeRequestWorkflow } from '../lib/workflowEngine.js'
 import { getSystemSettings } from '../lib/systemSettings.js'
 
@@ -15,7 +15,7 @@ export default async function handler(req, res) {
 
   const { action, id, requestId, costId } = req.query
   const actorId = req.user ? req.user.id : (req.headers['x-user-id'] || 'system')
-  const actor = req.user || await User.findById(actorId).lean()
+  const actor = req.user || await User.findById(actorId)
   const actorName = actor ? actor.name : 'Unknown User'
   const actorRole = req.user ? req.user.role : (req.headers['x-user-role'] || '')
 
@@ -38,7 +38,7 @@ export default async function handler(req, res) {
       let techUser = null
 
       if (technicianId) {
-        techUser = await User.findById(technicianId).lean()
+        techUser = await User.findById(technicianId)
         if (!techUser || techUser.role !== 'technician') return res.status(400).json({ success: false, error: 'A valid technician is required' })
         techName = techUser.name
       }
@@ -47,7 +47,7 @@ export default async function handler(req, res) {
 
       request.workOrder = {
         workOrderNumber,
-        technicianId: techUser ? techUser._id : null,
+        technicianId: techUser ? techUser.id : null,
         technicianName: techName,
         vendorName: vendorName || '',
         scope: scope || request.description,
@@ -72,7 +72,16 @@ export default async function handler(req, res) {
       })
 
       await finalizeRequestWorkflow(request, { id: actorId, name: actorName, role: actorRole })
-      await request.save()
+      await ServiceRequest.updateOne({ id: request.id }, {
+        $set: {
+          status: request.status,
+          workOrder: request.workOrder,
+          currentOwnerRole: request.currentOwnerRole,
+          slaDueAt: request.slaDueAt,
+          isEscalated: request.isEscalated
+        },
+        $push: { statusHistory: { $each: request.statusHistory } }
+      })
       return res.status(200).json({ success: true, data: request })
     }
 
@@ -141,9 +150,9 @@ export default async function handler(req, res) {
       else if (action === 'reassign') {
         const { technicianId } = req.body
         if (!technicianId) return res.status(400).json({ success: false, error: 'Technician is required for reassignment' })
-        const technician = await User.findById(technicianId).lean()
+        const technician = await User.findById(technicianId)
         if (!technician || technician.role !== 'technician' || technician.isActive === false) return res.status(400).json({ success: false, error: 'Select an active technician' })
-        request.workOrder.technicianId = technician._id
+        request.workOrder.technicianId = technician.id
         request.workOrder.technicianName = technician.name
         request.workOrder.status = 'ASSIGNED'
         request.workOrder.declineReason = ''
@@ -326,7 +335,16 @@ export default async function handler(req, res) {
       }
 
       await finalizeRequestWorkflow(request, { id: actorId, name: actorName, role: actorRole })
-      await request.save()
+      await ServiceRequest.updateOne({ id: request.id }, {
+        $set: {
+          status: request.status,
+          workOrder: request.workOrder,
+          currentOwnerRole: request.currentOwnerRole,
+          slaDueAt: request.slaDueAt,
+          isEscalated: request.isEscalated
+        },
+        $push: { statusHistory: { $each: request.statusHistory } }
+      })
       return res.status(200).json({ success: true, data: request })
     }
 

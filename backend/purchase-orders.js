@@ -1,9 +1,10 @@
-import { PurchaseOrder, Vendor, VendorQuotation, User, ServiceRequest, GoodsReceipt } from '../models.js'
+import { PurchaseOrder, Vendor, VendorQuotation, User, ServiceRequest, GoodsReceipt } from '../db/index.js'
 
 const roundMoney = value => Math.round((Number(value) + Number.EPSILON) * 100) / 100
 const normalizeUnit = value => ({ pieces: 'pcs', sets: 'set', units: 'unit', boxes: 'box', meters: 'm' }[String(value || '').toLowerCase()] || String(value || 'pcs').toLowerCase())
 const invalidOrder = message => Object.assign(new Error(message), { status: 400 })
 const displayManagerName = value => String(value || '').trim().replace(/^Service Manager$/i, 'Purchase Manager') || 'Purchase Manager'
+const MAINTENANCE_SERVICE_EMAIL = String(process.env.SERVICE_PROVIDER_EMAIL || 'service2@msec.edu.in').trim().toLowerCase()
 
 function withoutEmbeddedFiles(value) {
   const po = typeof value?.toObject === 'function' ? value.toObject() : { ...value }
@@ -28,24 +29,31 @@ let legacyQrReconciliationPromise = null
 async function reconcileLegacyQrClosures() {
   const finalQrPoIds = await GoodsReceipt.distinct('poId', { grnType: 'FINAL', source: 'PO_QR' })
   if (!finalQrPoIds.length) return
-  const stuck = await PurchaseOrder.find({ _id: { $in: finalQrPoIds }, status: 'FULFILLED' })
-    .select('_id requestId poNumber statusHistory')
+  const stuck = await PurchaseOrder.find({ id: { $in: finalQrPoIds }, status: 'FULFILLED' }, {
+    select: 'id requestId poNumber statusHistory'
+  })
   if (!stuck.length) return
   const now = new Date()
   await Promise.all(stuck.map(async po => {
-    po.status = 'CLOSED'
-    po.statusHistory.push({
-      oldStatus: 'FULFILLED',
-      newStatus: 'CLOSED',
-      actorId: 'system',
-      actorName: 'CampusServe',
-      comment: 'Reconciled legacy final gate QR receipt; PO closed automatically',
-      createdAt: now
-    })
-    await po.save()
+    await PurchaseOrder.updateOne(
+      { id: po.id },
+      {
+        $set: { status: 'CLOSED' },
+        $push: {
+          statusHistory: {
+            oldStatus: 'FULFILLED',
+            newStatus: 'CLOSED',
+            actorId: 'system',
+            actorName: 'CampusServe',
+            comment: 'Reconciled legacy final gate QR receipt; PO closed automatically',
+            createdAt: now
+          }
+        }
+      }
+    )
     if (po.requestId) {
       await ServiceRequest.updateOne(
-        { _id: po.requestId, status: { $ne: 'CLOSED' } },
+        { id: po.requestId, status: { $ne: 'CLOSED' } },
         {
           $set: { status: 'CLOSED', currentOwnerRole: null, closedAt: now },
           $push: {
@@ -74,7 +82,7 @@ function scheduleLegacyQrReconciliation() {
   })
 }
 
-import { connectToDatabase } from '../lib/mongo.js'
+import { connectToDatabase } from '../lib/pg.js'
 import { addProductIds, generateProductId, getProductId } from '../lib/productId.js'
 
 export default async function handler(req, res) {
@@ -86,7 +94,7 @@ export default async function handler(req, res) {
 
   const actorId = req.user ? req.user.id : (req.headers['x-user-id'] || 'system')
   const userRole = req.user ? req.user.role : (req.headers['x-user-role'] || '')
-  const actor = req.user || await User.findById(actorId).lean()
+  const actor = req.user || await User.findById(actorId)
   const actorName = actor ? actor.name : 'Unknown'
 
   const pushHistory = (po, oldStatus, newStatus, comment) => {
@@ -100,14 +108,14 @@ export default async function handler(req, res) {
     if (req.method === 'GET') {
       scheduleLegacyQrReconciliation()
       if (id && action === 'signed-po') {
-        const po = await PurchaseOrder.findById(id).select('signedPo createdById vendorId').lean()
+        const po = await PurchaseOrder.findById(id)
         if (!po) return res.status(404).json({ success: false, error: 'PO not found' })
         if (userRole === 'manager' && String(po.createdById || '') !== String(actorId)) {
           return res.status(403).json({ success: false, error: 'This purchase order is not assigned to you' })
         }
         if (userRole === 'vendor') {
-          const vendor = await Vendor.findOne({ email: actor?.email }).select('_id').lean()
-          if (!vendor || String(po.vendorId || '') !== String(vendor._id)) {
+          const vendor = await Vendor.findOne({ email: actor?.email })
+          if (!vendor || String(po.vendorId || '') !== String(vendor.id)) {
             return res.status(403).json({ success: false, error: 'This purchase order is not assigned to your vendor account' })
           }
         }
@@ -116,25 +124,23 @@ export default async function handler(req, res) {
       }
       if (id) {
         const po = await PurchaseOrder.findById(id)
-          .select('-signedPo.url -documentUrl -serviceExecution.workEvidence.url -serviceExecution.expenses.bill.url')
-          .lean()
         if (!po) return res.status(404).json({ success: false, error: 'PO not found' })
         if (userRole === 'manager' && String(po.createdById || '') !== String(actorId)) {
           return res.status(403).json({ success: false, error: 'This purchase order is not assigned to you' })
         }
         if (userRole === 'vendor') {
-          const vendor = await Vendor.findOne({ email: actor?.email }).select('_id').lean()
-          if (!vendor || String(po.vendorId || '') !== String(vendor._id)) {
+          const vendor = await Vendor.findOne({ email: actor?.email })
+          if (!vendor || String(po.vendorId || '') !== String(vendor.id)) {
             return res.status(403).json({ success: false, error: 'This purchase order is not assigned to your vendor account' })
           }
         }
         if (po.signedPo) po.signedPo.hasFile = Boolean(po.signedPo.name)
         const [vendor, request, creator] = await Promise.all([
-          po.vendorId && !po.vendorAddress ? Vendor.findById(po.vendorId).select('address').lean() : null,
+          po.vendorId && !po.vendorAddress ? Vendor.findById(po.vendorId) : null,
           po.requestId && (!po.adminDescription || !po.adminRequirementType || !po.adminAssessmentNote)
-            ? ServiceRequest.findById(po.requestId).select('description adminAssessment').lean()
+            ? ServiceRequest.findById(po.requestId)
             : null,
-          po.createdById ? User.findById(po.createdById).select('name').lean() : null
+          po.createdById ? User.findById(po.createdById) : null
         ])
         po.createdBy = displayManagerName(creator?.name || po.createdBy)
         if (vendor?.address) po.vendorAddress = vendor.address
@@ -156,27 +162,23 @@ export default async function handler(req, res) {
       if (req.query.requestId) filter.requestId = req.query.requestId
       if (userRole === 'manager') filter.createdById = actorId
       if (userRole === 'vendor') {
-        // Vendors see their own POs only
-        const vendor = await Vendor.findOne({ email: actor?.email }).select('_id').lean()
+        const vendor = await Vendor.findOne({ email: actor?.email })
         if (!vendor) return res.json({ success: true, data: [], total: 0 })
-        filter.vendorId = vendor._id
+        filter.vendorId = vendor.id
       }
-      const pos = await PurchaseOrder.find(filter)
-        .select('-signedPo.url -documentUrl -serviceExecution.workEvidence.url -serviceExecution.expenses.bill.url -statusHistory')
-        .sort({ createdAt: -1 })
-        .lean()
+      const pos = await PurchaseOrder.find(filter, { sort: { createdAt: -1 } })
       // Always derive request-based PO type from the admin assessment. This also
       // corrects legacy records that predate poType or received an incorrect default.
       const requestIds = [...new Set(pos.filter(po => po.requestId).map(po => String(po.requestId)))]
       const linkedRequests = requestIds.length
-        ? await ServiceRequest.find({ _id: { $in: requestIds } }).select('adminAssessment.requirementType').lean()
+        ? await ServiceRequest.find({ id: { $in: requestIds } }, { select: 'adminAssessment.requirementType' })
         : []
-      const requirementByRequest = new Map(linkedRequests.map(request => [String(request._id), request.adminAssessment?.requirementType]))
+      const requirementByRequest = new Map(linkedRequests.map(request => [String(request.id), request.adminAssessment?.requirementType]))
       const creatorIds = [...new Set(pos.filter(po => po.createdById).map(po => String(po.createdById)))]
       const creators = creatorIds.length
-        ? await User.find({ _id: { $in: creatorIds } }).select('name').lean()
+        ? await User.find({ id: { $in: creatorIds } }, { select: 'name' })
         : []
-      const creatorNameById = new Map(creators.map(creator => [String(creator._id), displayManagerName(creator.name)]))
+      const creatorNameById = new Map(creators.map(creator => [String(creator.id), displayManagerName(creator.name)]))
       pos.forEach(po => {
         po.createdBy = creatorNameById.get(String(po.createdById || '')) || displayManagerName(po.createdBy)
         const requirementType = requirementByRequest.get(String(po.requestId || '')) || po.adminRequirementType
@@ -205,7 +207,7 @@ export default async function handler(req, res) {
       let serviceRequest = null
       let serviceProvider = null
       if (selectedQuotationId) {
-        selectedQuotation = await VendorQuotation.findById(selectedQuotationId).lean()
+        selectedQuotation = await VendorQuotation.findById(selectedQuotationId)
         if (!selectedQuotation || !selectedQuotation.selected || selectedQuotation.status !== 'SELECTED') {
           return res.status(400).json({ success: false, error: 'Select a valid quotation before generating the purchase order' })
         }
@@ -232,17 +234,18 @@ export default async function handler(req, res) {
       if (!Array.isArray(items) || !items.length || !deliveryAddress) {
         return res.status(400).json({ success: false, error: 'At least one scope/item and a campus service or delivery address are required' })
       }
-      if (isServiceOrder && !serviceProviderId) return res.status(400).json({ success: false, error: 'Select an active service provider' })
       if (!isServiceOrder && !vendorId) return res.status(400).json({ success: false, error: 'Select an active vendor' })
       if (items.some(item => !String(item.description || '').trim())) {
         return res.status(400).json({ success: false, error: 'Every purchase order item needs a product description' })
       }
-      const vendor = isServiceOrder ? null : await Vendor.findById(vendorId).lean()
+      const vendor = isServiceOrder ? null : await Vendor.findById(vendorId)
       if (!isServiceOrder && !vendor) return res.status(404).json({ success: false, error: 'Vendor not found' })
       if (vendor && vendor.status !== 'ACTIVE') return res.status(400).json({ success: false, error: 'Vendor is not active' })
       if (isServiceOrder) {
-        serviceProvider = await User.findOne({ _id: serviceProviderId, role: 'service_provider', isActive: true }).lean()
-        if (!serviceProvider) return res.status(404).json({ success: false, error: 'Active service provider not found' })
+        // Maintenance POs are always routed to the dedicated service account.
+        // Do not rely on a manager-selected recipient for this workflow.
+        serviceProvider = await User.findOne({ email: MAINTENANCE_SERVICE_EMAIL, role: 'service_provider', isActive: true })
+        if (!serviceProvider) return res.status(503).json({ success: false, error: `Maintenance service account ${MAINTENANCE_SERVICE_EMAIL} is not active` })
       }
       if (requestId) {
         if (userRole === 'manager' && String(serviceRequest.assignedManagerId) !== String(actorId)) {
@@ -256,7 +259,7 @@ export default async function handler(req, res) {
         if (!isServiceRequest && serviceRequest.selectedQuotationId && String(serviceRequest.selectedQuotationId) !== String(selectedQuotationId || '')) {
           return res.status(400).json({ success: false, error: 'Generate the PO from the quotation selected for this indent' })
         }
-        const existingPo = await PurchaseOrder.findOne({ requestId, status: { $ne: 'CANCELLED' } }).lean()
+        const existingPo = await PurchaseOrder.findOne({ requestId, status: { $ne: 'CANCELLED' } })
         // Repeated clicks reopen the order already generated for this request.
         if (existingPo) {
           existingPo.items = addProductIds(existingPo.items)
@@ -334,11 +337,11 @@ export default async function handler(req, res) {
       const rnd = Math.floor(Math.random() * 900000) + 100000
       const poNumber = `PO-${year}-${rnd}`
 
-      const po = new PurchaseOrder({
+      const po = await PurchaseOrder.create({
         poNumber, requestId,
-        vendorId: vendor?._id, vendorName: vendor?.legalName || serviceProvider?.name, vendorEmail: vendor?.email || serviceProvider?.email,
+        vendorId: vendor?.id, vendorName: vendor?.legalName || serviceProvider?.name, vendorEmail: vendor?.email || serviceProvider?.email,
         vendorAddress: vendor?.address || '',
-        serviceProviderId: serviceProvider?._id,
+        serviceProviderId: serviceProvider?.id,
         serviceProviderName: serviceProvider?.name,
         serviceProviderEmail: serviceProvider?.email,
         adminRequirementType: serviceRequest?.adminAssessment?.requirementType || '',
@@ -354,13 +357,15 @@ export default async function handler(req, res) {
         warrantyTerms, notes, createdBy: actorName, createdById: actorId, status: 'DRAFT',
         statusHistory: [{ oldStatus: '', newStatus: 'DRAFT', actorId, actorName, comment: 'PO created as draft', createdAt: new Date() }]
       })
-      await po.save()
       if (serviceRequest) {
         const previousStatus = serviceRequest.status
-        serviceRequest.status = 'PURCHASE_ORDER_CREATED'
-        serviceRequest.currentOwnerRole = null
-        serviceRequest.statusHistory.push({ oldStatus: previousStatus, newStatus: 'PURCHASE_ORDER_CREATED', actorId, actorName, comment: `Purchase order ${po.poNumber} generated` })
-        await serviceRequest.save()
+        await ServiceRequest.updateOne(
+          { id: serviceRequest.id },
+          {
+            $set: { status: 'PURCHASE_ORDER_CREATED', currentOwnerRole: null },
+            $push: { statusHistory: { oldStatus: previousStatus, newStatus: 'PURCHASE_ORDER_CREATED', actorId, actorName, comment: `Purchase order ${po.poNumber} generated` } }
+          }
+        )
       }
       return res.status(201).json({ success: true, data: po })
     }
@@ -471,7 +476,7 @@ export default async function handler(req, res) {
         if (comment.length < 5 || comment.length > 500) {
           return res.status(400).json({ success: false, error: 'Provide a cancellation reason between 5 and 500 characters' })
         }
-        const hasReceipt = await GoodsReceipt.exists({ poId: po._id })
+        const hasReceipt = await GoodsReceipt.exists({ poId: po.id })
         if (hasReceipt) {
           return res.status(409).json({ success: false, error: 'This PO has a goods receipt and can no longer be cancelled' })
         }
@@ -503,8 +508,24 @@ export default async function handler(req, res) {
         return res.status(400).json({ success: false, error: 'Invalid action' })
       }
 
-      await po.save()
-      if (linkedRequestToReopen) await linkedRequestToReopen.save()
+      await PurchaseOrder.updateOne({ id: po.id }, {
+        $set: {
+          status: po.status,
+          signedPo: po.signedPo,
+          approvedBy: po.approvedBy,
+          approvedAt: po.approvedAt
+        },
+        $push: { statusHistory: { $each: po.statusHistory } }
+      })
+      if (linkedRequestToReopen) {
+        await ServiceRequest.updateOne(
+          { id: linkedRequestToReopen.id },
+          {
+            $set: { status: linkedRequestToReopen.status, currentOwnerRole: linkedRequestToReopen.currentOwnerRole },
+            $push: { statusHistory: { $each: linkedRequestToReopen.statusHistory } }
+          }
+        )
+      }
       return res.json({ success: true, data: withoutEmbeddedFiles(po) })
     }
 
@@ -519,10 +540,10 @@ export default async function handler(req, res) {
         return res.status(400).json({ success: false, error: 'Only DRAFT or REVISION_REQUIRED POs can be edited' })
       }
       if (req.body.items) {
-        const existingProductIds = new Map(po.items.map(item => [String(item._id), getProductId(item)]))
+        const existingProductIds = new Map(po.items.map(item => [String(item.id), getProductId(item)]))
         req.body.items = req.body.items.map(item => ({
           ...item,
-          productId: existingProductIds.get(String(item._id || '')) || generateProductId()
+          productId: existingProductIds.get(String(item.id || '')) || generateProductId()
         }))
       }
       const allowed = ['items', 'deliveryAddress', 'deliveryLocation', 'expectedDeliveryDate', 'paymentTerms', 'warrantyTerms', 'notes', 'deliveryCharge']
@@ -539,7 +560,22 @@ export default async function handler(req, res) {
         po.subtotal = subtotal; po.taxTotal = taxTotal; po.discountTotal = discountTotal
         po.grandTotal = subtotal - discountTotal + taxTotal + (po.deliveryCharge || 0)
       }
-      await po.save()
+      await PurchaseOrder.updateOne({ id: po.id }, {
+        $set: {
+          items: po.items,
+          deliveryAddress: po.deliveryAddress,
+          deliveryLocation: po.deliveryLocation,
+          expectedDeliveryDate: po.expectedDeliveryDate,
+          paymentTerms: po.paymentTerms,
+          warrantyTerms: po.warrantyTerms,
+          notes: po.notes,
+          deliveryCharge: po.deliveryCharge,
+          subtotal: po.subtotal,
+          taxTotal: po.taxTotal,
+          discountTotal: po.discountTotal,
+          grandTotal: po.grandTotal
+        }
+      })
       return res.json({ success: true, data: withoutEmbeddedFiles(po) })
     }
 

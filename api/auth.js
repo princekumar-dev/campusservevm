@@ -1,5 +1,5 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { User } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { User } from '../db/index.js'
 import bcrypt from 'bcryptjs'
 import { generateToken } from '../lib/auth.js'
 
@@ -89,7 +89,7 @@ export default async function handler(req, res) {
         scanPortal,
         scanTarget,
         user: {
-          id: user._id,
+          id: user.id,
           email: user.email,
           name: user.name,
           role: user.role,
@@ -103,10 +103,12 @@ export default async function handler(req, res) {
     } catch (error) {
       console.error('Authentication error:', error)
       const databaseUnavailable = [
-        'MongoServerSelectionError',
-        'MongoNetworkError',
-        'MongooseServerSelectionError'
-      ].includes(error?.name) || ['ETIMEDOUT', 'ECONNREFUSED'].includes(error?.code)
+        'ConnectionError',
+        'ECONNREFUSED',
+        '57P01',
+        '57P02',
+        '57P03'
+      ].includes(error?.code) || ['ETIMEDOUT', 'ECONNREFUSED'].includes(error?.code)
 
       return res.status(databaseUnavailable ? 503 : 500).json({
         success: false,

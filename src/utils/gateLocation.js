@@ -26,7 +26,7 @@ export async function getGateLocation(scope = 'goods') {
             : 'Your current location could not be determined. Turn on GPS and try again.'
         reject(new Error(message))
       },
-      { enableHighAccuracy: true, timeout: 15000, maximumAge: 15000 }
+      { enableHighAccuracy: true, timeout: 30000, maximumAge: 30000 }
     )
   })
 }

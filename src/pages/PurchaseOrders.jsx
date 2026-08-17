@@ -217,12 +217,12 @@ function CreatePOModal({ onClose, onSaved, sourceRequest, selectedQuotation }) {
                     <input type="number" value={item.unitPrice} onChange={e => updateItem(idx, 'unitPrice', e.target.value)} min="0" step="0.01" required={!isServicePo} className="mt-1 w-full rounded-lg border border-violet-300 bg-white p-2 text-xs font-semibold outline-none focus:border-violet-500 focus:ring-2 focus:ring-violet-100" />
                   </div>
                   <div className="min-w-0">
-                    <label className="whitespace-nowrap text-[11px] font-bold uppercase tracking-wider text-slate-400">GST (%) *</label>
+                    <label className="block truncate whitespace-nowrap text-[11px] font-bold uppercase tracking-wider text-slate-400">GST (%) *</label>
                     <input type="number" value={item.taxRate} onChange={e => updateItem(idx, 'taxRate', e.target.value)} min="0" max="100" step="0.01" className="mt-1 w-full rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs font-semibold outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100" />
                   </div>
                   <div className="min-w-0">
                     <label className="block truncate whitespace-nowrap text-[11px] font-bold uppercase tracking-wider text-slate-400" title="Calculated total">Calculated total (₹)</label>
-                    <div className="mt-1 flex min-h-[34px] items-center justify-end rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-extrabold text-slate-700">₹{getLineValues(item).subtotal.toFixed(2)}</div>
+                    <input type="text" readOnly value={`₹${getLineValues(item).subtotal.toFixed(2)}`} className="mt-1 w-full rounded-lg border border-slate-200 bg-slate-50 p-2 text-xs font-extrabold text-right text-slate-700 outline-none" />
                   </div>
                   <div className="flex flex-wrap items-center justify-between gap-2 border-t border-slate-200/70 pt-3 sm:col-span-full">
                     <span className="text-xs text-slate-500">{isServicePo ? 'Actual costs and scanned bills will be recorded by the service provider after completing the work.' : `${item.quantityOrdered || 1} ${item.unit || 'unit'} × ₹${getLineValues(item).unitPrice.toFixed(2)} = ₹${getLineValues(item).subtotal.toFixed(2)} · GST ${Number(item.taxRate) || 0}%`}</span>
@@ -481,7 +481,7 @@ export default function PurchaseOrders() {
                     <td className="px-6 py-4 font-semibold text-slate-800">{po.vendorName}</td>
                     <td className="px-6 py-4"><span className={`whitespace-nowrap rounded-full border px-2.5 py-1 text-[11px] font-bold ${poTypeConfig[getPoType(po)].color}`}>{poTypeConfig[getPoType(po)].label}</span></td>
                     <td className="px-6 py-4 text-slate-500 text-xs">{po.items?.length || 0} items</td>
-                    <td className="px-6 py-4 text-right font-bold text-slate-800">₹{(po.grandTotal || 0).toFixed(2)}</td>
+                    <td className="px-6 py-4 text-right font-bold text-slate-800">₹{Number(po.grandTotal || 0).toFixed(2)}</td>
                     <td className="px-6 py-4 text-slate-500 text-xs">
                       {po.expectedDeliveryDate ? new Date(po.expectedDeliveryDate).toLocaleDateString('en-IN') : '—'}
                     </td>

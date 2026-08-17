@@ -1,5 +1,5 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { ServiceRequest, User } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { ServiceRequest, User } from '../db/index.js'
 import { finalizeRequestWorkflow } from '../lib/workflowEngine.js'
 
 export default async function handler(req, res) {
@@ -14,7 +14,7 @@ export default async function handler(req, res) {
 
   const { action, id, requestId } = req.query
   const actorId = req.user ? req.user.id : (req.headers['x-user-id'] || 'system')
-  const actor = req.user || await User.findById(actorId).lean()
+  const actor = req.user || await User.findById(actorId)
   const actorName = actor ? actor.name : 'Unknown User'
   const actorRole = req.user ? req.user.role : (req.headers['x-user-role'] || '')
 
@@ -88,7 +88,16 @@ export default async function handler(req, res) {
       })
 
       await finalizeRequestWorkflow(request, { id: actorId, name: actorName, role: actorRole })
-      await request.save()
+      await ServiceRequest.updateOne({ id: request.id }, {
+        $set: {
+          status: request.status,
+          invoice: request.invoice,
+          currentOwnerRole: request.currentOwnerRole,
+          slaDueAt: request.slaDueAt,
+          isEscalated: request.isEscalated
+        },
+        $push: { statusHistory: { $each: request.statusHistory } }
+      })
       return res.status(200).json({ success: true, data: request })
     }
 
@@ -179,7 +188,16 @@ export default async function handler(req, res) {
       }
 
       await finalizeRequestWorkflow(request, { id: actorId, name: actorName, role: actorRole })
-      await request.save()
+      await ServiceRequest.updateOne({ id: request.id }, {
+        $set: {
+          status: request.status,
+          invoice: request.invoice,
+          currentOwnerRole: request.currentOwnerRole,
+          slaDueAt: request.slaDueAt,
+          isEscalated: request.isEscalated
+        },
+        $push: { statusHistory: { $each: request.statusHistory } }
+      })
       return res.status(200).json({ success: true, data: request })
     }
 

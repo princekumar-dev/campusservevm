@@ -1,5 +1,5 @@
 import { Link, useLocation } from 'react-router-dom'
-import { LayoutDashboard, ClipboardList, PlusCircle, BarChart3, Users, ShoppingCart, QrCode, ClipboardCheck, Truck, Building2, IndianRupee, FileText } from 'lucide-react'
+import { LayoutDashboard, ClipboardList, PlusCircle, BarChart3, Users, ShoppingCart, QrCode, ClipboardCheck, Truck, Building2, IndianRupee, FileText, Package } from 'lucide-react'
 import { getAuthOrNull } from '../utils/auth'
 
 function BottomNav() {
@@ -141,9 +141,9 @@ function BottomNav() {
       <div className="md:hidden fixed bottom-0 left-0 right-0 z-40 bg-slate-950/95 backdrop-blur-md border-t border-violet-900/30 px-1 py-1.5 flex items-center justify-around safe-area-inset-bottom">
         <NavItem to="/dashboard" icon={LayoutDashboard} label="Home" isActive={location.pathname === '/dashboard'} />
         <NavItem to="/requests" icon={ClipboardList} label="Assigned" isActive={isActive('/requests')} />
-        <NavItem to="/vendors" icon={Building2} label="Vendors" isActive={isActive('/vendors')} />
-        <NavItem to="/quotations" icon={FileText} label="Quotes" isActive={isActive('/quotations')} />
         <NavItem to="/purchase-orders" icon={ShoppingCart} label="POs" isActive={isActive('/purchase-orders')} />
+        <NavItem to="/reports" icon={BarChart3} label="Reports" isActive={location.pathname === '/reports'} />
+        <NavItem to="/stock" icon={Package} label="Stock" isActive={location.pathname === '/stock'} />
       </div>
     )
   }

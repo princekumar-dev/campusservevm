@@ -1,5 +1,5 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { ServiceRequest, PurchaseOrder, User, Vendor, VendorQuotation } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { ServiceRequest, PurchaseOrder, User, Vendor, VendorQuotation } from '../db/index.js'
 import { finalizeRequestWorkflow } from '../lib/workflowEngine.js'
 
 export default async function handler(req, res) {
@@ -14,7 +14,7 @@ export default async function handler(req, res) {
 
   const { action, id, requestId } = req.query
   const actorId = req.user ? req.user.id : (req.headers['x-user-id'] || 'system')
-  const actor = req.user || await User.findById(actorId).lean()
+  const actor = req.user || await User.findById(actorId)
   const actorName = actor ? actor.name : 'Unknown User'
   const actorRole = req.user ? req.user.role : (req.headers['x-user-role'] || '')
 
@@ -22,7 +22,7 @@ export default async function handler(req, res) {
     // A quotation is a standalone vendor offer. Multiple offers may belong to
     // the same indent/request and one may be selected by its assigned PM.
     if (req.method === 'GET' && id && !action) {
-      const quotation = await VendorQuotation.findById(id).lean()
+      const quotation = await VendorQuotation.findById(id)
       if (!quotation) return res.status(404).json({ success: false, error: 'Quotation not found' })
       if (actorRole === 'manager' && String(quotation.assignedManagerId || '') !== String(actorId)) {
         return res.status(403).json({ success: false, error: 'This quotation is not assigned to you' })
@@ -33,17 +33,17 @@ export default async function handler(req, res) {
     if (req.method === 'POST' && action === 'select' && id) {
       let quotation = await VendorQuotation.findById(id)
       if (!quotation) {
-        const legacyRequest = await ServiceRequest.findById(id).lean()
+        const legacyRequest = await ServiceRequest.findById(id)
         if (!legacyRequest?.quotation?.quotationNumber) return res.status(404).json({ success: false, error: 'Quotation not found' })
         const legacy = legacyRequest.quotation
-        let vendor = legacy.vendorId ? await Vendor.findById(legacy.vendorId).lean() : null
-        if (!vendor && legacy.vendorName) vendor = await Vendor.findOne({ legalName: legacy.vendorName }).lean()
+        let vendor = legacy.vendorId ? await Vendor.findById(legacy.vendorId) : null
+        if (!vendor && legacy.vendorName) vendor = await Vendor.findOne({ legalName: legacy.vendorName })
         if (!vendor) return res.status(400).json({ success: false, error: 'Link this legacy quotation to an active vendor before selecting it' })
-        quotation = await VendorQuotation.findOne({ requestId: legacyRequest._id, quotationNumber: legacy.quotationNumber })
+        quotation = await VendorQuotation.findOne({ requestId: legacyRequest.id, quotationNumber: legacy.quotationNumber })
         if (!quotation) quotation = await VendorQuotation.create({
-          quotationNumber: legacy.quotationNumber, requestId: legacyRequest._id,
+          quotationNumber: legacy.quotationNumber, requestId: legacyRequest.id,
           requestNumber: legacyRequest.requestNumber, requestTitle: legacyRequest.title,
-          assignedManagerId: legacyRequest.assignedManagerId, vendorId: vendor._id,
+          assignedManagerId: legacyRequest.assignedManagerId, vendorId: vendor.id,
           vendorName: vendor.legalName, vendorCode: vendor.vendorCode, vendorEmail: vendor.email,
           subtotal: legacy.subtotal || 0, taxTotal: legacy.taxTotal || 0,
           discountTotal: legacy.discountTotal || 0, grandTotal: legacy.grandTotal || 0,
@@ -53,13 +53,13 @@ export default async function handler(req, res) {
       }
       if (!['manager', 'super_admin'].includes(actorRole)) return res.status(403).json({ success: false, error: 'Only the PM can select a quotation' })
       if (actorRole === 'manager' && String(quotation.assignedManagerId || '') !== String(actorId)) return res.status(403).json({ success: false, error: 'This indent is not assigned to you' })
-      await VendorQuotation.updateMany({ requestId: quotation.requestId, _id: { $ne: quotation._id } }, { $set: { selected: false, status: 'NOT_SELECTED' }, $unset: { selectedBy: 1, selectedAt: 1 } })
+      await VendorQuotation.updateMany({ requestId: quotation.requestId, id: { $ne: quotation.id } }, { $set: { selected: false, status: 'NOT_SELECTED' }, $unset: { selectedBy: 1, selectedAt: 1 } })
+      await VendorQuotation.updateOne({ id: quotation.id }, { $set: { selected: true, status: 'SELECTED', selectedBy: actorName, selectedAt: new Date() } })
       quotation.selected = true
       quotation.status = 'SELECTED'
       quotation.selectedBy = actorName
       quotation.selectedAt = new Date()
-      await quotation.save()
-      await ServiceRequest.updateOne({ _id: quotation.requestId }, { $set: { selectedQuotationId: quotation._id } })
+      await ServiceRequest.updateOne({ id: quotation.requestId }, { $set: { selectedQuotationId: quotation.id } })
       return res.status(200).json({ success: true, data: quotation })
     }
 
@@ -77,26 +77,26 @@ export default async function handler(req, res) {
 
       const quoteQuery = actorRole === 'manager' ? { assignedManagerId: actorId } : {}
       const [storedQuotations, requests] = await Promise.all([
-        VendorQuotation.find(quoteQuery).sort({ createdAt: -1 }).lean(),
-        ServiceRequest.find(query)
-          .select('requestNumber institution title requesterName assignedManagerId assignedManagerName selectedQuotationId status quotation createdAt')
-          .sort({ createdAt: -1 })
-          .lean()
+        VendorQuotation.find(quoteQuery, { sort: { createdAt: -1 } }),
+        ServiceRequest.find(query, {
+          sort: { createdAt: -1 },
+          select: 'requestNumber institution title requesterName assignedManagerId assignedManagerName selectedQuotationId status quotation createdAt'
+        })
       ])
 
       // Older POs may predate quotation snapshots. Include them as vendor-price
       // quotations so existing records are visible without data recreation.
-      const requestIds = requests.map(request => request._id)
+      const requestIds = requests.map(request => request.id)
       const purchaseOrders = requestIds.length
-        ? await PurchaseOrder.find({ requestId: { $in: requestIds } })
-          .select('poNumber requestId vendorId vendorName vendorEmail subtotal taxTotal discountTotal grandTotal expectedDeliveryDate paymentTerms createdBy items createdAt')
-          .sort({ createdAt: -1 })
-          .lean()
+        ? await PurchaseOrder.find({ requestId: { $in: requestIds } }, {
+            sort: { createdAt: -1 },
+            select: 'poNumber requestId vendorId vendorName vendorEmail subtotal taxTotal discountTotal grandTotal expectedDeliveryDate paymentTerms createdBy items createdAt'
+          })
         : []
       const poByRequest = new Map(purchaseOrders.map(po => [String(po.requestId), po]))
 
       const quotations = requests.map(request => {
-        const po = poByRequest.get(String(request._id))
+        const po = poByRequest.get(String(request.id))
         const quotation = request.quotation?.quotationNumber ? request.quotation : (po ? {
           quotationNumber: String(po.poNumber || '').replace(/^PO-/, 'QUO-'),
           vendorId: po.vendorId,
@@ -124,8 +124,8 @@ export default async function handler(req, res) {
         if (!quotation) return null
         return {
         ...quotation,
-        _id: request._id,
-        requestId: request._id,
+        id: request.id,
+        requestId: request.id,
         requestNumber: request.requestNumber,
         institution: request.institution || 'msec',
         requestTitle: request.title,
@@ -140,9 +140,10 @@ export default async function handler(req, res) {
 
       const storedNumbers = new Set(storedQuotations.map(quotation => quotation.quotationNumber))
       const legacyOnly = quotations.filter(quotation => !storedNumbers.has(quotation.quotationNumber))
-      const requestById = new Map(requests.map(request => [String(request._id), request]))
+      const requestById = new Map(requests.map(request => [String(request.id), request]))
       const enrichedStored = storedQuotations.map(quotation => {
         const request = requestById.get(String(quotation.requestId))
+
         return {
           ...quotation,
           institution: request?.institution || 'msec',
@@ -163,7 +164,7 @@ export default async function handler(req, res) {
 
       const { items, terms, validUntil, vendorId } = req.body
       if (!vendorId) return res.status(400).json({ success: false, error: 'Select a vendor for this quotation' })
-      const vendor = await Vendor.findOne({ _id: vendorId, status: 'ACTIVE' }).lean()
+      const vendor = await Vendor.findOne({ id: vendorId, status: 'ACTIVE' })
       if (!vendor) return res.status(400).json({ success: false, error: 'The selected vendor is unavailable or inactive' })
       if (!items || !Array.isArray(items) || items.length === 0) {
         return res.status(400).json({ success: false, error: 'At least one line item is required' })
@@ -205,13 +206,13 @@ export default async function handler(req, res) {
       const year = new Date().getFullYear()
       const randomNum = Math.floor(Math.random() * 90000) + 10000
       const quotationNumber = `QUO-${year}-${randomNum}`
-      const quotation = new VendorQuotation({
+      const quotation = await VendorQuotation.create({
         quotationNumber,
-        requestId: request._id,
+        requestId: request.id,
         requestNumber: request.requestNumber,
         requestTitle: request.title,
         assignedManagerId: request.assignedManagerId,
-        vendorId: vendor._id,
+        vendorId: vendor.id,
         vendorName: vendor.legalName,
         vendorCode: vendor.vendorCode,
         vendorEmail: vendor.email,
@@ -221,15 +222,13 @@ export default async function handler(req, res) {
         discountTotal,
         additionalCharges: 0,
         grandTotal,
-        validUntil: validUntil ? new Date(validUntil) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days default
+        validUntil: validUntil ? new Date(validUntil) : new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
         terms: terms || 'Standard maintenance quotation terms apply.',
         createdBy: actorName,
-        items: processedItems,
-        createdBy: actorName
+        items: processedItems
       })
-      await quotation.save()
       request.statusHistory.push({ oldStatus: request.status, newStatus: request.status, actorId, actorName, comment: `Vendor quotation ${quotationNumber} added from ${vendor.legalName}` })
-      await request.save()
+      await ServiceRequest.updateOne({ id: request.id }, { $push: { statusHistory: { $each: request.statusHistory } } })
       return res.status(201).json({ success: true, data: quotation })
     }
 
@@ -323,7 +322,17 @@ export default async function handler(req, res) {
       }
 
       await finalizeRequestWorkflow(request, { id: actorId, name: actorName, role: actorRole })
-      await request.save()
+      await ServiceRequest.updateOne({ id: request.id }, {
+        $set: {
+          status: request.status,
+          currentOwnerRole: request.currentOwnerRole,
+          slaDueAt: request.slaDueAt,
+          isEscalated: request.isEscalated,
+          closedAt: request.closedAt,
+          quotation: request.quotation
+        },
+        $push: { statusHistory: { $each: request.statusHistory } }
+      })
       return res.status(200).json({ success: true, data: request })
     }
 

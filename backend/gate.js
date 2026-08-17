@@ -1,7 +1,6 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { GateEntry, DeliverySchedule, GoodsReceipt, PurchaseOrder, User } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { GateEntry, DeliverySchedule, GoodsReceipt, PurchaseOrder, User } from '../db/index.js'
 import crypto from 'crypto'
-import { isValidObjectId } from 'mongoose'
 import { createPoQrToken, verifyIssuedPoQrToken } from '../lib/poQrToken.js'
 import { addProductIds } from '../lib/productId.js'
 import { canReceivePo, getPoReceivingBlockReason } from '../lib/poReceiving.js'
@@ -17,7 +16,7 @@ export default async function handler(req, res) {
   }
 
   const actorId = req.user ? req.user.id : (req.headers['x-user-id'] || 'system')
-  const actor = req.user || (isValidObjectId(actorId) ? await User.findById(actorId).lean() : null)
+  const actor = req.user || await User.findById(actorId)
   const actorName = actor ? actor.name : 'Unknown'
   const actorRole = req.user?.role || req.headers['x-user-role'] || ''
 
@@ -34,10 +33,10 @@ export default async function handler(req, res) {
       if (!/^PO-\d{4}-\d{6}$/.test(poCode)) {
         return res.status(400).json({ success: false, error: 'Enter a valid PO number such as PO-2026-123456' })
       }
-      const po = await PurchaseOrder.findOne({ poNumber: poCode }).select('_id poNumber status').lean()
+      const po = await PurchaseOrder.findOne({ poNumber: poCode })
       if (!po) return res.status(404).json({ success: false, error: 'Purchase order not found' })
-      const poToken = createPoQrToken(po._id)
-      return res.json({ success: true, data: { poId: po._id, poNumber: po.poNumber, token: poToken, status: po.status } })
+      const poToken = createPoQrToken(po.id)
+      return res.json({ success: true, data: { poId: po.id, poNumber: po.poNumber, token: poToken, status: po.status } })
     }
 
     // Older gate receipts have gateVerifiedAt but may predate the PO_QR source
@@ -51,11 +50,11 @@ export default async function handler(req, res) {
 
     // ── GET /api/gate?action=history — PO receiving scan history ────────────
     if (req.method === 'GET' && action === 'history') {
-      const receipts = await GoodsReceipt.find(gateReceiptFilter)
-        .select('poNumber grnNumber grnType status receivedByName grandTotal receivedAt createdAt')
-        .sort({ receivedAt: -1, createdAt: -1 })
-        .limit(500)
-        .lean()
+      const receipts = await GoodsReceipt.find(gateReceiptFilter, {
+        sort: { receivedAt: -1, createdAt: -1 },
+        limit: 500,
+        select: 'poNumber grnNumber grnType status receivedByName grandTotal receivedAt createdAt'
+      })
       return res.json({ success: true, data: receipts, total: receipts.length })
     }
 
@@ -68,7 +67,7 @@ export default async function handler(req, res) {
         GoodsReceipt.countDocuments(receivedTodayFilter),
         GoodsReceipt.countDocuments({ ...receivedTodayFilter, grnType: 'PARTIAL' }),
         GoodsReceipt.countDocuments({ ...receivedTodayFilter, grnType: 'FINAL' }),
-        GoodsReceipt.find(gateReceiptFilter).select('-receiptEvidence.url -items').sort({ receivedAt: -1, createdAt: -1 }).limit(8).lean()
+        GoodsReceipt.find(gateReceiptFilter, { sort: { receivedAt: -1, createdAt: -1 }, limit: 8 })
       ])
       return res.json({ success: true, data: { readyToReceive, receivedToday, partialToday, closedToday, recent } })
     }
@@ -87,15 +86,13 @@ export default async function handler(req, res) {
       }
 
       const po = await PurchaseOrder.findById(poId)
-        .select('-signedPo.url -documentUrl -serviceExecution.workEvidence.url -serviceExecution.expenses.bill.url -statusHistory')
-        .lean()
       if (!po) return res.status(404).json({ success: false, error: 'Purchase Order not found' })
       const canReceive = canReceivePo(po)
 
       return res.json({
         success: true,
         data: {
-          _id: po._id,
+          id: po.id,
           poNumber: po.poNumber,
           status: po.status,
           signedPoStatus: po.signedPo?.status || 'NOT_UPLOADED',
@@ -110,7 +107,7 @@ export default async function handler(req, res) {
           deliveryLocation: po.deliveryLocation,
           expectedDeliveryDate: po.expectedDeliveryDate,
           items: addProductIds(po.items || []).map(item => ({
-            itemId: item._id,
+            itemId: item.id,
             productId: item.productId,
             description: item.description,
             specification: item.specification,
@@ -132,7 +129,7 @@ export default async function handler(req, res) {
       const entries = await GoodsReceipt.find({
         ...gateReceiptFilter,
         receivedAt: { $gte: todayStart, $lte: todayEnd }
-      }).select('-receiptEvidence.url').sort({ receivedAt: -1 }).lean()
+      }, { sort: { receivedAt: -1 } })
       return res.json({ success: true, data: entries })
     }
 
@@ -174,17 +171,20 @@ export default async function handler(req, res) {
 
       const oldStatusBeforeReject = ds.status
 
-      const entry = new GateEntry({
+      const entry = await GateEntry.create({
         deliveryScheduleId, poId: ds.poId, poNumber: ds.poNumber,
         verificationMethod: method || 'MANUAL_CODE', decision: 'REJECTED', rejectionReason: reason,
         securityUserId: actorId, securityUserName: actorName,
         actualDeliveryPersonName: actualPersonName || '', actualVehicleNumber: actualVehicleNumber || ''
       })
-      await entry.save()
 
-      ds.status = 'ENTRY_REJECTED'
-      ds.statusHistory.push({ oldStatus: oldStatusBeforeReject, newStatus: 'ENTRY_REJECTED', actorId, actorName, comment: `Entry rejected: ${reason}`, createdAt: new Date() })
-      await ds.save()
+      await DeliverySchedule.updateOne(
+        { id: ds.id },
+        {
+          $set: { status: 'ENTRY_REJECTED' },
+          $push: { statusHistory: { oldStatus: oldStatusBeforeReject, newStatus: 'ENTRY_REJECTED', actorId, actorName, comment: `Entry rejected: ${reason}`, createdAt: new Date() } }
+        }
+      )
 
       return res.json({ success: true, decision: 'REJECTED', reason, data: entry })
     }
@@ -219,7 +219,7 @@ async function validateDelivery(ds, method, res) {
   }
 
   // Verify PO is still active
-  const po = await PurchaseOrder.findById(ds.poId).lean()
+  const po = await PurchaseOrder.findById(ds.poId)
   if (!po || !['ACTIVE', 'PARTIALLY_FULFILLED'].includes(po.status)) {
     res.status(400).json({ success: false, decision: 'REJECTED', reason: 'PO_INACTIVE', message: 'Purchase Order is no longer active' })
     return { rejected: true }
@@ -229,20 +229,21 @@ async function validateDelivery(ds, method, res) {
 }
 
 async function recordEntry(ds, method, decision, reason, actorId, actorName, actualPersonName, actualVehicleNumber, res) {
-  const entry = new GateEntry({
-    deliveryScheduleId: ds._id, poId: ds.poId, poNumber: ds.poNumber,
+  const entry = await GateEntry.create({
+    deliveryScheduleId: ds.id, poId: ds.poId, poNumber: ds.poNumber,
     verificationMethod: method, decision, rejectionReason: reason,
     securityUserId: actorId, securityUserName: actorName,
     actualDeliveryPersonName: actualPersonName || ds.deliveryPersonName,
     actualVehicleNumber: actualVehicleNumber || ds.vehicleNumber
   })
-  await entry.save()
 
-  // Update delivery schedule status
-  ds.passUsageCount = (ds.passUsageCount || 0) + 1
-  ds.status = 'ENTRY_APPROVED'
-  ds.statusHistory.push({ oldStatus: 'PASS_GENERATED', newStatus: 'ENTRY_APPROVED', actorId, actorName, comment: `Gate entry approved via ${method}`, createdAt: new Date() })
-  await ds.save()
+  await DeliverySchedule.updateOne(
+    { id: ds.id },
+    {
+      $set: { passUsageCount: (ds.passUsageCount || 0) + 1, status: 'ENTRY_APPROVED' },
+      $push: { statusHistory: { oldStatus: 'PASS_GENERATED', newStatus: 'ENTRY_APPROVED', actorId, actorName, comment: `Gate entry approved via ${method}`, createdAt: new Date() } }
+    }
+  )
 
   return res.json({
     success: true,

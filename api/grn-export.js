@@ -3,8 +3,8 @@ import JSZip from 'jszip'
 import fs from 'fs'
 import path from 'path'
 import sharp from 'sharp'
-import { connectToDatabase } from '../lib/mongo.js'
-import { GoodsReceipt, PurchaseOrder, ServiceRequest, DeliverySchedule, GateEntry } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { GoodsReceipt, PurchaseOrder, ServiceRequest, DeliverySchedule, GateEntry } from '../db/index.js'
 import { getSystemSettings } from '../lib/systemSettings.js'
 
 const money = value => `INR ${Number(value || 0).toLocaleString('en-IN', { minimumFractionDigits: 2 })}`
@@ -242,9 +242,9 @@ function appendWorkflowAnnexure(doc, po, currentGrn, request, context = {}, bran
 
   title(`GRN sequence and cumulative receiving (${allGrns.length})`)
   allGrns.forEach((receipt, index) => {
-    const receiptAccepted = (receipt.items || []).reduce((sum, item) => sum + Number(item.quantityAcceptedNow || 0), 0)
+  const receiptAccepted = (receipt.items || []).reduce((sum, item) => sum + Number(item.quantityAcceptedNow || 0), 0)
     const receiptDelivered = (receipt.items || []).reduce((sum, item) => sum + Number(item.quantityDeliveredNow || 0), 0)
-    auditRow(receipt.receivedAt || receipt.createdAt, `${index + 1}. ${receipt.grnType}${String(receipt._id) === String(currentGrn._id) ? ' · THIS PDF' : ''}`, receipt.receivedByName, `${receipt.grnNumber} · Delivered ${receiptDelivered}, accepted ${receiptAccepted} · ${money(receipt.grandTotal)} · ${receipt.remarks || 'No additional remarks'}`, receipt.grnType === 'FINAL' ? green : violet)
+    auditRow(receipt.receivedAt || receipt.createdAt, `${index + 1}. ${receipt.grnType}${String(receipt.id) === String(currentGrn.id) ? ' · THIS PDF' : ''}`, receipt.receivedByName, `${receipt.grnNumber} · Delivered ${receiptDelivered}, accepted ${receiptAccepted} · ${money(receipt.grandTotal)} · ${receipt.remarks || 'No additional remarks'}`, receipt.grnType === 'FINAL' ? green : violet)
   })
 
   const gateVerifiedGrns = !gateEntries.length
@@ -274,15 +274,18 @@ function appendWorkflowAnnexure(doc, po, currentGrn, request, context = {}, bran
 }
 
 async function loadWorkflowContext(po) {
-  const allGrns = await GoodsReceipt.find({ poId: po._id }).sort({ receivedAt: 1, createdAt: 1 }).lean()
-  const deliveries = await DeliverySchedule.find({ poId: po._id }).sort({ scheduledDate: 1, createdAt: 1 }).lean()
-  const deliveryIds = deliveries.map(delivery => delivery._id)
-  const gateEntries = await GateEntry.find({
-    $or: [
-      { poId: po._id },
-      ...(deliveryIds.length ? [{ deliveryScheduleId: { $in: deliveryIds } }] : [])
-    ]
-  }).sort({ entryTime: 1, createdAt: 1 }).lean()
+  const allGrns = await GoodsReceipt.find({ poId: po.id }, { sort: { receivedAt: 1, createdAt: 1 } })
+  const deliveries = await DeliverySchedule.find({ poId: po.id }, { sort: { scheduledDate: 1, createdAt: 1 } })
+  const deliveryIds = deliveries.map(delivery => delivery.id)
+  const gateEntries = await GateEntry.find(
+    {
+      $or: [
+        { poId: po.id },
+        ...(deliveryIds.length ? [{ deliveryScheduleId: { $in: deliveryIds } }] : [])
+      ]
+    },
+    { sort: { entryTime: 1, createdAt: 1 } }
+  )
   return { allGrns, deliveries, gateEntries }
 }
 
@@ -414,7 +417,7 @@ async function grnPdf(po, grn, request = null, workflowContext = {}) {
   return collectPdf(doc => {
     const items = (grn.items || []).filter(item => Number(item.quantityDeliveredNow || 0) > 0).map(item => {
       const poItem = (po?.items || []).find(candidate =>
-        String(candidate._id) === String(item.poItemId) ||
+        String(candidate.id) === String(item.poItemId) ||
         candidate.productId === item.productId ||
         candidate.description === item.poItemDescription
       )
@@ -678,13 +681,13 @@ export default async function handler(req, res) {
     await connectToDatabase()
     const { type, grnId, poId } = req.query
     if (type === 'grn') {
-      const grn = await GoodsReceipt.findById(grnId).lean()
+      const grn = await GoodsReceipt.findById(grnId)
       if (!grn) return res.status(404).json({ success: false, error: 'GRN not found' })
-      const po = await PurchaseOrder.findById(grn.poId).lean()
+      const po = await PurchaseOrder.findById(grn.poId)
       if (!po || String(po.createdById || '') !== String(actorId)) {
         return res.status(403).json({ success: false, error: 'You can download only GRNs for purchase orders assigned to you' })
       }
-      const request = po?.requestId ? await ServiceRequest.findById(po.requestId).lean() : null
+      const request = po?.requestId ? await ServiceRequest.findById(po.requestId) : null
       const workflowContext = await loadWorkflowContext(po)
       const pdf = await grnPdf(po, grn, request, workflowContext)
       res.setHeader('Content-Type', 'application/pdf')
@@ -692,13 +695,13 @@ export default async function handler(req, res) {
       return res.end(pdf)
     }
     if (type === 'po-package') {
-      const po = await PurchaseOrder.findById(poId).lean()
+      const po = await PurchaseOrder.findById(poId)
       if (!po) return res.status(404).json({ success: false, error: 'Purchase order not found' })
       if (String(po.createdById || '') !== String(actorId)) {
         return res.status(403).json({ success: false, error: 'You can download only purchase orders assigned to you' })
       }
-      const grns = await GoodsReceipt.find({ poId }).sort({ createdAt: 1 }).lean()
-      const request = po.requestId ? await ServiceRequest.findById(po.requestId).lean() : null
+      const grns = await GoodsReceipt.find({ poId }, { sort: { createdAt: 1 } })
+      const request = po.requestId ? await ServiceRequest.findById(po.requestId) : null
       const workflowContext = await loadWorkflowContext(po)
       const zip = new JSZip()
       zip.file(`${safeName(po.poNumber)}-complete-report.pdf`, await poPdf(po, grns, request, workflowContext))

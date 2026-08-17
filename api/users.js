@@ -1,5 +1,5 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { User } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { User } from '../db/index.js'
 import bcrypt from 'bcryptjs'
 import { getSystemSettings } from '../lib/systemSettings.js'
 
@@ -23,14 +23,12 @@ export default async function handler(req, res) {
         if (!allowedRoles.includes(role)) {
           return res.status(400).json({ success: false, error: 'Invalid role filter' })
         }
-        const users = await User.find({ role, isActive: true })
-          .select('_id name email role department phoneNumber')
-          .sort({ name: 1 })
-          .lean()
+        const users = await User.find({ role, isActive: true }, { sort: { name: 1 }, select: 'id name email role department phoneNumber' })
         return res.status(200).json({
           success: true,
           users: users.map(u => ({
-            _id: u._id,
+            _id: u.id,
+            id: u.id,
             name: u.name,
             email: u.email,
             role: u.role,
@@ -44,14 +42,14 @@ export default async function handler(req, res) {
         if (!userId) {
           return res.status(400).json({ success: false, error: 'userId is required' })
         }
-        const user = await User.findById(userId).select('_id name email role department phoneNumber eSignature').lean()
+        const user = await User.findById(userId)
         if (!user) {
           return res.status(404).json({ success: false, error: 'User not found' })
         }
         return res.status(200).json({
           success: true,
           user: {
-            id: user._id,
+            id: user.id,
             name: user.name,
             email: user.email,
             role: user.role,
@@ -67,16 +65,17 @@ export default async function handler(req, res) {
         if (!userId) {
           return res.status(400).json({ success: false, error: 'userId is required' })
         }
-        const requestingUser = await User.findById(userId).select('_id role').lean()
+        const requestingUser = await User.findById(userId)
         if (!requestingUser) {
           return res.status(401).json({ success: false, error: 'User not found' })
         }
         if (String(requestingUser.role || '').toLowerCase() !== 'super_admin') {
           return res.status(403).json({ success: false, error: 'Only the super administrator can list users' })
         }
-        const users = await User.find().select('_id name email role department phoneNumber createdAt').sort({ createdAt: -1 }).lean()
+        const users = await User.find({}, { sort: { createdAt: -1 }, select: 'id name email role department phoneNumber createdAt' })
         const safe = users.map(u => ({
-          id: u._id,
+          _id: u.id,
+          id: u.id,
           name: u.name,
           email: u.email,
           role: u.role,
@@ -150,11 +149,10 @@ export default async function handler(req, res) {
         phoneNumber: normalizedPhoneNumber
       }
 
-      const user = new User(userData)
-      await user.save()
+      const user = await User.create(userData)
 
       const safe = {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email,
         role: user.role,
@@ -200,12 +198,12 @@ export default async function handler(req, res) {
           return res.status(400).json({ success: false, error: 'New password must be at least 6 characters' })
         }
 
-        const adminUser = req.user || await User.findById(adminUserId).select('_id role').lean()
+        const adminUser = req.user || await User.findById(adminUserId)
         if (!adminUser || adminUser.role !== 'super_admin') {
           return res.status(403).json({ success: false, error: 'Only the super administrator can change user passwords' })
         }
 
-        const targetUser = await User.findById(targetUserId).select('_id email role').lean()
+        const targetUser = await User.findById(targetUserId)
         if (!targetUser) {
           return res.status(404).json({ success: false, error: 'User not found' })
         }
@@ -215,8 +213,9 @@ export default async function handler(req, res) {
 
         try {
           const hashedPassword = await bcrypt.hash(newPassword, 10)
-          const updatedUser = await User.findByIdAndUpdate(targetUserId, { password: hashedPassword }, { new: true }).select('_id email role').lean()
-          return res.status(200).json({ success: true, message: 'Password updated successfully', user: { id: updatedUser._id, email: updatedUser.email, role: updatedUser.role } })
+          await User.updateOne({ id: targetUserId }, { $set: { password: hashedPassword } })
+          const updatedUser = await User.findById(targetUserId)
+          return res.status(200).json({ success: true, message: 'Password updated successfully', user: { id: updatedUser.id, email: updatedUser.email, role: updatedUser.role } })
         } catch (error) {
           console.error('Error resetting user password as admin:', error)
           return res.status(500).json({ success: false, error: 'Failed to reset user password' })
@@ -227,8 +226,9 @@ export default async function handler(req, res) {
 
       if (action === 'update-signature') {
         const { eSignature } = req.body
-        const u = await User.findByIdAndUpdate(userId, { eSignature }, { new: true }).lean()
-        return res.status(200).json({ success: true, user: { id: u._id, eSignature: u.eSignature } })
+        await User.updateOne({ id: userId }, { $set: { eSignature } })
+        const u = await User.findById(userId)
+        return res.status(200).json({ success: true, user: { id: u.id, eSignature: u.eSignature } })
       }
 
       if (action === 'update-profile') {
@@ -246,9 +246,10 @@ export default async function handler(req, res) {
           updateData.name = normalizedName
         }
         if (phoneNumber) updateData.phoneNumber = phoneNumber
-        const u = await User.findByIdAndUpdate(userId, updateData, { new: true }).lean()
+        await User.updateOne({ id: userId }, { $set: updateData })
+        const u = await User.findById(userId)
         if (!u) return res.status(404).json({ success: false, error: 'User not found' })
-        return res.status(200).json({ success: true, user: { id: u._id, name: u.name, phoneNumber: u.phoneNumber } })
+        return res.status(200).json({ success: true, user: { id: u.id, name: u.name, phoneNumber: u.phoneNumber } })
       }
 
       if (action === 'reset-password') {
@@ -270,8 +271,9 @@ export default async function handler(req, res) {
             return res.status(401).json({ success: false, error: 'Current password is incorrect' })
           }
           const hashedPassword = await bcrypt.hash(newPassword, 10)
-          const updatedUser = await User.findByIdAndUpdate(userId, { password: hashedPassword }, { new: true }).lean()
-          return res.status(200).json({ success: true, message: 'Password updated successfully', user: { id: updatedUser._id, email: updatedUser.email } })
+          await User.updateOne({ id: userId }, { $set: { password: hashedPassword } })
+          const updatedUser = await User.findById(userId)
+          return res.status(200).json({ success: true, message: 'Password updated successfully', user: { id: updatedUser.id, email: updatedUser.email } })
         } catch (error) {
           console.error('Error resetting password:', error)
           return res.status(500).json({ success: false, error: 'Failed to reset password' })

@@ -1,4 +1,4 @@
-import { GoodsReceipt, PurchaseOrder, ServiceRequest } from '../models.js'
+import { GoodsReceipt, PurchaseOrder, ServiceRequest } from '../db/index.js'
 import { getSystemSettings } from '../lib/systemSettings.js'
 import { verifyIssuedPoQrToken } from '../lib/poQrToken.js'
 import { requireGateLocation } from '../lib/gateGeofence.js'
@@ -8,7 +8,7 @@ const serviceBoundaryBufferMeters = Number(process.env.SERVICE_PO_BOUNDARY_BUFFE
 
 function actor(req) {
   return {
-    id: String(req.user?.id || req.user?._id || ''),
+    id: String(req.user?.id || ''),
     name: req.user?.name || req.user?.email || 'Service provider',
     email: String(req.user?.email || '').toLowerCase(),
     role: req.user?.role || ''
@@ -18,7 +18,7 @@ function actor(req) {
 async function loadServiceOrder(id) {
   const po = await PurchaseOrder.findById(id)
   if (!po) return { error: 'Service purchase order not found', status: 404 }
-  const request = po.requestId ? await ServiceRequest.findById(po.requestId).lean() : null
+  const request = po.requestId ? await ServiceRequest.findById(po.requestId) : null
   if (request?.adminAssessment?.requirementType !== 'MAINTENANCE') {
     return { error: 'This purchase order uses the goods receiving workflow', status: 409 }
   }
@@ -53,19 +53,16 @@ export default async function serviceOrdersHandler(req, res) {
       if (!(await requireGateLocation(req, res, { boundaryBufferMeters: serviceBoundaryBufferMeters, settingKey: 'servicePoGeofenceEnabled' })).allowed) return
     }
     if (!id && req.method === 'GET') {
-      const serviceRequests = await ServiceRequest.find({ 'adminAssessment.requirementType': 'MAINTENANCE' }).select('_id title location assetCode').lean()
-      const requestById = new Map(serviceRequests.map(request => [String(request._id), request]))
-      const filter = { requestId: { $in: serviceRequests.map(request => request._id) } }
+      const serviceRequests = await ServiceRequest.find({ 'adminAssessment.requirementType': 'MAINTENANCE' }, { select: 'id title location assetCode' })
+      const requestById = new Map(serviceRequests.map(request => [String(request.id), request]))
+      const filter = { requestId: { $in: serviceRequests.map(request => request.id) } }
       if (user.role === 'vendor') filter.vendorEmail = user.email
       if (user.role === 'service_provider') filter.$or = [
         { serviceProviderId: user.id },
         { serviceProviderEmail: user.email },
         { serviceProviderId: { $exists: false }, serviceProviderEmail: { $exists: false } }
       ]
-      const orders = await PurchaseOrder.find(filter)
-        .select('-signedPo.url -qrTokenHash -documentUrl -serviceExecution.workEvidence.url -serviceExecution.expenses.bill.url -statusHistory')
-        .sort({ createdAt: -1 })
-        .lean()
+      const orders = await PurchaseOrder.find(filter, { sort: { createdAt: -1 } })
       return res.json({ success: true, data: orders.map(order => ({ ...order, request: requestById.get(String(order.requestId)) })) })
     }
     if (!id) return res.status(400).json({ success: false, error: 'Service PO id is required' })
@@ -75,7 +72,7 @@ export default async function serviceOrdersHandler(req, res) {
     if (!canAccess(po, user)) return res.status(403).json({ success: false, code: 'SERVICE_PO_NOT_ASSIGNED', error: 'This service order is not assigned to your account' })
 
     if (req.method === 'GET') {
-      return res.json({ success: true, data: po.toObject(), request })
+      return res.json({ success: true, data: po, request })
     }
     if (req.method !== 'POST') return res.status(405).json({ success: false, error: 'Method not allowed' })
 
@@ -130,7 +127,7 @@ export default async function serviceOrdersHandler(req, res) {
       if (po.serviceExecution.status !== 'SUBMITTED') {
         return res.status(409).json({ success: false, error: 'The service provider must submit completed work before GRN approval' })
       }
-      const existing = await GoodsReceipt.findOne({ poId: po._id, source: 'SERVICE_PO', status: 'FINALIZED' })
+      const existing = await GoodsReceipt.findOne({ poId: po.id, source: 'SERVICE_PO', status: 'FINALIZED' })
       if (existing) return res.status(409).json({ success: false, error: `Service GRN ${existing.grnNumber} already exists` })
 
       const expenses = po.serviceExecution.expenses || []
@@ -139,7 +136,7 @@ export default async function serviceOrdersHandler(req, res) {
       const grnNumber = `SGRN-${year}-${Math.floor(Math.random() * 900000) + 100000}`
       const grn = await GoodsReceipt.create({
         grnNumber,
-        poId: po._id,
+        poId: po.id,
         poNumber: po.poNumber,
         grnType: 'FINAL',
         status: 'FINALIZED',
@@ -185,23 +182,28 @@ export default async function serviceOrdersHandler(req, res) {
         const serviceRequest = await ServiceRequest.findById(po.requestId)
         if (serviceRequest && serviceRequest.status !== 'CLOSED') {
           const previousStatus = serviceRequest.status
-          serviceRequest.status = 'CLOSED'
-          serviceRequest.currentOwnerRole = null
-          serviceRequest.closedAt = new Date()
-          serviceRequest.statusHistory.push({
-            oldStatus: previousStatus, newStatus: 'CLOSED', actorId: user.id, actorName: user.name,
-            comment: `Service completion approved and ${grnNumber} generated`
-          })
-          await serviceRequest.save()
+          await ServiceRequest.updateOne(
+            { id: serviceRequest.id },
+            {
+              $set: { status: 'CLOSED', currentOwnerRole: null, closedAt: new Date() },
+              $push: { statusHistory: { oldStatus: previousStatus, newStatus: 'CLOSED', actorId: user.id, actorName: user.name, comment: `Service completion approved and ${grnNumber} generated` } }
+            }
+          )
         }
       }
-      await po.save()
-      return res.json({ success: true, data: po.toObject(), grn })
+      await PurchaseOrder.updateOne({ id: po.id }, {
+        $set: { status: po.status, serviceExecution: po.serviceExecution },
+        $push: { statusHistory: { $each: po.statusHistory } }
+      })
+      return res.json({ success: true, data: po, grn })
     } else {
       return res.status(400).json({ success: false, error: 'Unknown service action' })
     }
-    await po.save()
-    return res.json({ success: true, data: po.toObject() })
+    await PurchaseOrder.updateOne({ id: po.id }, {
+      $set: { status: po.status, serviceExecution: po.serviceExecution },
+      $push: { statusHistory: { $each: po.statusHistory } }
+    })
+    return res.json({ success: true, data: po })
   } catch (error) {
     console.error('Service Orders API error:', error)
     return res.status(500).json({ success: false, error: error.message || 'Unable to update service order' })

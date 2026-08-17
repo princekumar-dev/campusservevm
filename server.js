@@ -1,10 +1,10 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import compression from 'compression';
 import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
-import { connectToDatabase } from './lib/mongo.js';
-import mongoose from 'mongoose';
+import { connectToDatabase, getPool, closeDatabase } from './lib/pg.js';
 import { authenticate } from './lib/auth.js';
 import { parseAllowedOrigins, validateProductionEnvironment } from './lib/env.js';
 import { ensureServiceAccount } from './lib/ensureServiceAccount.js';
@@ -41,6 +41,11 @@ app.use(helmet({
   },
   crossOriginEmbedderPolicy: false,
 }));
+
+// Compress JSON and static responses before they cross the network. Large
+// lists, dashboards and report payloads transfer substantially faster while
+// already-compressed images and files are left untouched by this middleware.
+app.use(compression({ threshold: 1024 }));
 
 app.use((req, res, next) => {
   if (process.env.NODE_ENV === 'production' && process.env.FORCE_HTTPS !== 'false' && !req.secure) {
@@ -145,6 +150,70 @@ app.use('/api', async (req, res, next) => {
   authenticate(req, res, next);
 });
 
+// A small server-side cache removes repeated Atlas round trips for the list and
+// dashboard APIs. It is deliberately private (keyed by the authenticated user)
+// and is cleared for every write, so one user's data is never shared with
+// another and successful updates are immediately visible.
+const apiReadCache = new Map();
+const cacheableApiPaths = new Set([
+  '/api/requests', '/api/reports', '/api/purchase-orders', '/api/quotations',
+  '/api/work-orders', '/api/service-orders', '/api/vendors', '/api/deliveries',
+  '/api/gate', '/api/grn', '/api/stock'
+]);
+const API_READ_CACHE_MS = Math.max(1000, Number(process.env.API_READ_CACHE_MS || 15000));
+
+app.use('/api', async (req, res, next) => {
+  if (req.method !== 'GET') {
+    apiReadCache.clear();
+    // A read that races an in-progress update must not remain cached after the
+    // update succeeds.
+    res.on('finish', () => {
+      if (res.statusCode >= 200 && res.statusCode < 300) apiReadCache.clear();
+    });
+    return next();
+  }
+  if (!cacheableApiPaths.has(req.path)) return next();
+
+  const user = req.user || {};
+  const identity = `${user.id || req.headers['x-user-id'] || ''}:${user.role || req.headers['x-user-role'] || ''}:${user.email || req.headers['x-user-email'] || ''}`;
+  const key = `${identity}:${req.originalUrl}`;
+  const now = Date.now();
+  const existing = apiReadCache.get(key);
+  if (existing && existing.expiresAt > now) {
+    const cachedResponse = await existing.promise;
+    if (cachedResponse) {
+      res.setHeader('X-CampusServe-Cache', 'HIT');
+      return res.status(cachedResponse.status).json(cachedResponse.body);
+    }
+  }
+  if (existing) apiReadCache.delete(key);
+
+  let resolveResponse;
+  const entry = {
+    expiresAt: now + API_READ_CACHE_MS,
+    promise: new Promise(resolve => { resolveResponse = resolve; })
+  };
+  apiReadCache.set(key, entry);
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      resolveResponse({ status: res.statusCode, body });
+      res.setHeader('X-CampusServe-Cache', 'MISS');
+    } else {
+      apiReadCache.delete(key);
+      resolveResponse(null);
+    }
+    return originalJson(body);
+  };
+  res.on('finish', () => {
+    if (!res.headersSent || res.statusCode < 200 || res.statusCode >= 300) {
+      apiReadCache.delete(key);
+      resolveResponse(null);
+    }
+  });
+  next();
+});
+
 // Serve static files from /public at the site root (ensures /service-worker.js is available)
 const publicDir = path.join(process.cwd(), 'public');
 app.use(express.static(publicDir, {
@@ -169,6 +238,7 @@ import reportsHandler from './api/reports.js';
 import generatePdfHandler from './api/generate-pdf.js';
 import grnExportHandler from './api/grn-export.js';
 import notificationsRouter from './api/notifications.js';
+import stockHandler from './api/stock.js';
 import vendorsHandler from './backend/vendors.js';
 import purchaseOrdersHandler from './backend/purchase-orders.js';
 import serviceOrdersHandler from './backend/service-orders.js';
@@ -181,10 +251,15 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 // Health endpoint: quick DB connection state and server timestamp
-app.get('/api/health', (req, res) => {
-  const dbState = mongoose?.connection?.readyState ?? 0;
-  const ok = dbState === 1
-  res.status(ok ? 200 : 503).json({ ok, timestamp: new Date().toISOString(), database: ok ? 'connected' : 'unavailable' });
+app.get('/api/health', async (req, res) => {
+  try {
+    const pool = getPool()
+    const result = await pool.query('SELECT 1 as ok')
+    const ok = result.rows[0]?.ok === 1
+    res.status(ok ? 200 : 503).json({ ok, timestamp: new Date().toISOString(), database: ok ? 'connected' : 'unavailable' });
+  } catch (err) {
+    res.status(503).json({ ok: false, timestamp: new Date().toISOString(), database: 'unavailable' });
+  }
 });
 
 app.all('/api/auth', authLimiter, authHandler);
@@ -199,6 +274,7 @@ app.all('/api/reports', reportsHandler);
 app.all('/api/generate-pdf', generatePdfHandler);
 app.all('/api/grn-export', grnExportHandler);
 app.use('/api/notifications', notificationsRouter);
+app.all('/api/stock', stockHandler);
 app.all('/api/vendors', vendorsHandler);
 app.all('/api/purchase-orders', purchaseOrdersHandler);
 app.all('/api/service-orders', serviceOrdersHandler);
@@ -232,7 +308,7 @@ app.use((err, req, res, next) => {
 let server
 async function start() {
   await connectToDatabase()
-  console.log('MongoDB connected and indexes verified')
+  console.log('PostgreSQL connected and schema verified')
   const serviceAccount = await ensureServiceAccount()
   if (serviceAccount) console.log(`Service portal account ready: ${process.env.SERVICE_PORTAL_EMAIL}`)
 
@@ -244,7 +320,7 @@ async function start() {
 async function shutdown(signal) {
   console.log(`${signal} received; shutting down`)
   if (server) await new Promise(resolve => server.close(resolve))
-  await mongoose.disconnect()
+  await closeDatabase()
   process.exit(0)
 }
 

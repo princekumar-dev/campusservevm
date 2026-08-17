@@ -70,7 +70,11 @@ async function request(method, url, opts = {}) {
     window.dispatchEvent(new CustomEvent('apiProgress', { detail: { count: activeCount } }));
   } catch (e) {}
 
-  if (dedupe && inFlight.has(key)) {
+  // A second identical read cannot provide newer data while the first is still
+  // in flight. Always coalesce GETs, even when a caller bypasses the response
+  // cache for an explicit refresh. This prevents duplicate page-load requests
+  // and React development re-renders from competing for the same API/database.
+  if ((method === 'GET' || dedupe) && inFlight.has(key)) {
     // Make sure we decrement if we return a deduped request early because that promise will also hit the finally
     activeCount = Math.max(0, Number(window.__activeApiRequests || 0) - 1);
     window.__activeApiRequests = activeCount;

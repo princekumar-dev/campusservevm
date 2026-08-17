@@ -38,12 +38,15 @@
   -webkit-backface-visibility: hidden;
 }
 
-/* Optimize hover and transition elements - exclude interactive UI */
-[class*="hover:"]:not(.header *):not(.modal *),
-[class*="transition"]:not(.header *):not(.modal *),
-[class*="animate"]:not(.header *):not(.modal *) {
-  transform: translateZ(0);
+/* Do not promote every button, card and list item to its own GPU layer.
+   Excess compositing is a common source of scroll stutter on integrated GPUs.
+   Only real, short-lived animation elements receive the compositing hint. */
+.animate-spin,
+.animate-fadeIn,
+.animate-slideUp,
+.animate-slideDown {
   backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
 }
 
 /* ========================================
@@ -198,7 +201,9 @@ img[loading="lazy"] {
 
 /* Optimize common transitions */
 .transition-all {
-  transition-property: all;
+  /* Avoid animating layout and paint-heavy properties (such as box-shadow,
+     width and height). These visual properties cover the app's interactions. */
+  transition-property: color, background-color, border-color, opacity, transform;
   transition-duration: var(--perf-transition-base);
 }
 

@@ -100,7 +100,6 @@ function Header() {
         <>
           <Link className={linkClass('/requests')} to="/requests">Request Triage</Link>
           <Link className={linkClass('/purchase-orders')} to="/purchase-orders">Purchase Orders</Link>
-          <Link className={linkClass('/reports')} to="/reports">Reports</Link>
         </>
       )}
 
@@ -129,6 +128,8 @@ function Header() {
           <Link className={linkClass('/quotations')} to="/quotations">Quotations</Link>
           <Link className={linkClass('/purchase-orders')} to="/purchase-orders">Purchase Orders</Link>
           <Link className={linkClass('/grn')} to="/grn">GRN</Link>
+          <Link className={linkClass('/reports')} to="/reports">Reports</Link>
+          <Link className={linkClass('/stock')} to="/stock">Stock</Link>
         </>
       )}
 

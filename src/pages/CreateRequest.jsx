@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef, useMemo } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import { useAlert } from '../components/AlertContext'
 import apiClient from '../utils/apiClient'
@@ -24,7 +24,34 @@ const priorities = [
   { value: 'EMERGENCY', label: 'Emergency', color: 'bg-rose-50 text-rose-600 border-rose-200', activeColor: 'bg-rose-600 text-white', desc: 'Immediate risk' },
 ]
 
+const campusItems = [
+  // Classroom Equipment
+  'Projector', 'Projector Lamp', 'Projector Screen', 'Projection Screen Motor', 'Interactive Whiteboard', 'Smart Board', 'LED Display Panel', 'HDMI Cable', 'VGA Cable', 'DisplayPort Cable', 'Wireless Presenter / Laser Pointer', 'Public Address System', 'Ceiling Speaker', 'Wireless Microphone', 'Wired Microphone', 'Amplifier', 'Audio Mixer', 'LED Tube Light', 'CFL Bulb', 'Panel Light', 'Down Light', 'Emergency Light', 'Tube Light Choke', 'Ceiling Fan', 'Wall Fan', 'Exhaust Fan', 'Pedestal Fan', 'Whiteboard', 'Marker Pen', 'Whiteboard Duster', 'Chalk Board', 'Chalk', 'Duster Board', 'Classroom Clock', 'Classroom Curtain', 'Curtain Rod', 'Blinds / Window Shade',
+  // IT Hardware & Network
+  'Desktop Computer', 'Computer Monitor', 'LCD Monitor', 'LED Monitor', 'Keyboard', 'Wired Mouse', 'Wireless Mouse', 'Mouse Pad', 'UPS (Uninterruptible Power Supply)', 'CPU Cabinet', 'Motherboard', 'RAM Module', 'Hard Disk Drive (HDD)', 'Solid State Drive (SSD)', 'Graphics Card', 'Network Switch', 'Network Router', 'Wi-Fi Access Point', 'Ethernet Cable', 'Patch Cable', 'Patch Panel', 'Fiber Optic Cable', 'Network Rack', 'Server Rack', 'Cat6 Cable', 'RJ45 Connector', 'Cable Tray', 'Cable Tie', 'Printer', 'Laser Printer', 'Inkjet Printer', 'Dot Matrix Printer', 'Printer Toner Cartridge', 'Printer Ink Cartridge', 'Printer Drum Unit', 'Scanner', 'Flatbed Scanner', 'Document Scanner', 'Webcam', 'Headphones', 'Headset with Mic', 'Speakers', 'External Speaker', 'USB Hub', 'Pen Drive / USB Drive', 'External Hard Disk', 'Laptop', 'Laptop Charger', 'Laptop Battery', 'Laptop Screen', 'Laptop Keyboard', 'Docking Station', 'Laptop Stand', 'Cooling Pad', 'HDMI to USB Adapter', 'VGA to HDMI Converter', 'Webcam Cover', 'Privacy Screen Filter', 'KVM Switch', 'Serial Port Cable', 'DB9 Connector',
+  // Electrical & Lights
+  'MCB / Circuit Breaker', 'Miniature Circuit Breaker', 'Earth Leakage Circuit Breaker', 'Electrical Switch', 'Modular Switch', 'Power Socket', 'Extension Board', 'Power Strip', 'Stabilizer', 'Inverter', 'Inverter Battery', 'Diesel Generator Set', 'Transformer', 'Conduit Pipe', 'PVC Conduit', 'Wiring Harness', 'Electrical Wire', 'Copper Cable', 'Armoured Cable', 'Junction Box', 'Distribution Board', 'Changeover Switch', 'Relay', 'Contactor', 'Capacitor Bank', 'Earthing Strip', 'Earthing Rod', 'Lightning Arrestor', 'Fluorescent Tube', 'LED Panel Light', 'Industrial Light Fitting', 'Motion Sensor Light', 'Timer Switch', 'Dimmer Switch', 'Dimmer Module', 'Photocell Sensor', 'Cable Gland', 'Wire Nut', 'Crimping Tool', 'Wire Stripper', 'Multimeter', ' Clamp Meter',
+  // Plumbing & Water
+  'Water Tap', 'Pillar Tap', 'CP Tap', 'SS Tap', 'Angle Valve', 'Stop Cock', 'Ball Valve', 'Gate Valve', 'Check Valve', 'Pipe Fitting', 'PVC Pipe', 'CPVC Pipe', 'PPR Pipe', 'GI Pipe', 'Pipe Elbow', 'Pipe Tee', 'Pipe Socket', 'Pipe Clamp', 'Pipe Holder', 'Water Tank', 'Overhead Tank', 'Sump Tank', 'Float Valve', 'Flush Valve', 'Flush Tank', 'Dual Flush Valve', 'Flush Sensor', 'Drainage Pipe', 'Floor Trap', 'Anti Cockroach Trap', 'Nahani Trap', 'Chajja Trap', 'P Trap', 'S Trap', 'Water Heater / Geyser', 'Instant Water Heater', 'Storage Water Heater', 'Water Filter / Purifier', 'RO Membrane', 'UV Bulb', 'Sediment Filter', 'Carbon Filter', 'Shower Head', 'Shower Arm', 'Health Faucet', 'Bidet Spray', 'Seat Cover', 'Toilet Cistern', 'Flush Handle', 'Connector Hose', 'Flexible Pipe', 'Basin Mixer', 'Pillar Cock', 'Sink Drain', 'Waste Coupling', 'Inlet Pipe', 'Sewer Pipe', 'Manhole Cover',
+  // HVAC & A/C
+  'Split AC Unit', 'Window AC Unit', 'Cassette AC Unit', 'Ducted AC Unit', 'AC Remote Control', 'AC Filter', 'AC Outdoor Unit', 'AC Indoor Unit', 'AC Copper Pipe', 'AC Drain Pipe', 'AC Installation Kit', 'AC Gas (R22)', 'AC Gas (R410A)', 'AC Compressor', 'AC Fan Motor', 'AC Capacitor', 'AC PCB Board', 'AC Swing Motor', 'Thermostat', 'HVAC Duct', 'Air Vent', 'Exhaust Duct', 'Fresh Air Intake', 'Cooling Tower', 'AHU (Air Handling Unit)', 'VRF System', 'CRAC Unit', 'Humidifier', 'Dehumidifier', 'Air Purifier', 'HEPA Filter', 'AC Silicone Pad', 'Vibration Isolator', 'Insulation Foam', 'AC Drain Tray',
+  // Furniture Repair
+  'Office Chair', 'Executive Chair', 'Ergonomic Chair', 'Student Chair', 'Lab Stool', 'Folding Chair', 'Visitor Chair', 'Desk / Table', 'Office Table', 'Conference Table', 'Computer Table', 'Lab Table', 'Teacher Desk', 'Cubicle Partition', 'Bookshelf / Rack', 'Metal Rack', 'Wooden Shelf', 'Wall Shelf', 'Cupboard / Almirah', 'Filing Cabinet', 'Storage Cabinet', 'Pedestal / Drawer Unit', 'Notice Board', 'Pin Board', 'Cork Board', 'Coat Hook', 'Door Handle', 'Door Lock', 'Mortise Lock', 'Padlock', 'Tower Bolt', 'Door Hinge', 'Door Closer', 'Door Stopper', 'Window Glass', 'Window Frame', 'Window Hinge', 'Window Lock', 'Glass Door Fitting', 'Sliding Door Track', 'Partition Panel', 'Ceiling Tile', 'Floor Tile', 'Carpet / Rug', 'Rubber Mat', 'Anti-fatigue Mat',
+  // Civil & Painting
+  'Wall Paint', 'Primer', 'Emulsion Paint', 'Enamel Paint', 'Texture Paint', 'Primer Coat', 'Putty', 'Wall Putty', 'Wood Primer', 'Red Oxide Primer', 'Waterproofing Compound', 'Wall Putty Knife', 'Paint Roller', 'Paint Brush', 'Paint Tray', 'Masking Tape', 'Sand Paper', 'Grinding Wheel', 'Drill Machine', 'Hammer Drill', 'Core Cutter', 'Wall Chaser', 'Concrete Mixer', 'Plastering Trowel', 'Brick', 'Cement', 'Sand', 'Gravel', 'Steel Rod', 'Binding Wire', 'Shuttering Plywood', 'Scaffolding', 'Marble Slab', 'Granite Slab', 'Ceramic Tile', 'Wallpaper', 'Wallpaper Adhesive', 'Grout', 'Tile Spacer', 'Skirting Board', 'Cornice', 'Molding', 'POP Design', 'False Ceiling Channel', 'Gypsum Board', 'Acoustic Panel',
+  // Lab Equipment
+  'Oscilloscope', 'Function Generator', 'Digital Multimeter', 'LCR Meter', 'Power Supply Unit', 'Soldering Iron', 'Soldering Station', 'Desoldering Pump', 'Breadboard', 'PCB Board', 'Logic Analyzer', 'Signal Generator', 'Spectrum Analyzer', 'Network Analyzer', 'Lab Chemical Reagent', 'Beaker', 'Conical Flask', 'Test Tube', 'Test Tube Holder', 'Microscope', 'Compound Microscope', 'Stereo Microscope', 'Centrifuge', 'Autoclave', 'pH Meter', 'Conductivity Meter', 'Weighing Scale', 'Hot Plate', 'Magnetic Stirrer', 'Bunsen Burner', 'Reagent Bottle', 'Measuring Cylinder', 'Pipette', 'Burette', 'Petri Dish', 'Incubator', 'Fume Hood', 'Glass Rod', 'Mortar and Pestle', 'Volumetric Flask',
+  // Stationery
+  'A4 Printing Paper', 'A3 Printing Paper', 'Notepad / Notebook', 'Spiral Notebook', 'Sticky Notes', 'Index Cards', 'Ballpoint Pen', 'Gel Pen', 'Fountain Pen', 'Marker Pen', 'Whiteboard Marker', 'Permanent Marker', 'Highlighter', 'Pencil', 'Mechanical Pencil', 'Pencil Lead', 'Eraser', 'Sharpener', 'Ruler', 'Steel Scale', 'Scissors', 'Paper Clips', 'Foldback Clips', 'Stapler', 'Heavy-duty Stapler', 'Staple Pins', 'Binder Clips', 'Double Binder Clips', 'File Folder', 'Lever Arch File', 'Document Envelope', 'Zip Pouch', 'Transparent Sheet / Laminating Pouch', 'Laminating Pouch A4', 'Stamp Pad', 'Rubber Stamp', 'Ink Refill', 'Correction Tape', 'Correction Fluid', 'Tape Dispenser', 'Cello Tape', 'Masking Tape', 'Insulation Tape', 'Glue Stick', 'Adhesive Tape Roll', 'Super Glue', 'Epoxy Adhesive', 'Calculator', 'Scientific Calculator', 'Desk Organizer / Pen Stand', 'Document Tray', 'Paper Cutter / Guillotine', 'Punching Machine', 'Two-hole Punch', 'Four-hole Punch', 'Chalk', 'Colored Chalk', 'Chart Paper', 'Poster Board', 'Colored Paper', 'Glitter Paper', 'Carbon Paper', 'Tracing Paper', 'Graph Paper', 'Register / Log Book', 'Attendance Register', 'Cash Book', 'Receipt Book',
+  // General Supplies
+  'Fire Extinguisher', 'CO2 Fire Extinguisher', 'ABC Fire Extinguisher', 'Fire Alarm', 'Smoke Detector', 'Sprinkler System', 'First Aid Kit', 'Stretch Bandage', 'Antiseptic Lotion', 'Cotton Roll', 'Ice Pack', 'Signage Board', 'Exit Sign', 'Safety Sign', 'Direction Board', 'Name Plate', 'Room Number Plate', 'DND Board', 'Whiteboard eraser', 'Projector Ceiling Mount', 'Wall Mount Bracket', 'Camera Tripod', 'CCTV Camera', 'DVR / NVR Unit', 'CCTV Cable', 'Biometric Device', 'RFID Card Reader', 'Access Control Panel', 'Boom Barrier', 'Turnstile Gate', 'Visitor Management System', 'Intercom Phone', 'EPABX System', 'Telephone Cable', 'Telephone Handset', 'Door Bell', 'Music System', 'TV Display', 'Smart TV', 'Media Player', 'Remote Control', 'Batteries AA', 'Batteries AAA', 'Battery Charger', 'Power Bank', 'Extension Cord', 'Multi-plug Adapter', 'Surge Protector', 'Earthing Kit', 'Cable Label', 'Velcro Strip', 'Hook and Loop Tape', 'Magnetic Whiteboard', 'Wall Clock', 'Digital Clock', 'Thermometer', 'Hygrometer', 'Barometer', 'Survey Instrument', 'Measuring Tape 5m', 'Measuring Tape 10m', 'Spirit Level', 'Plumb Bob', 'Chalk Line', 'Paint Sprayer', 'Air Compressor', 'Pressure Washer', 'Vacuum Cleaner', 'Floor Scrubber', 'Carpet Cleaner',
+]
+
 function CreateRequest() {
+  const [itemQuery, setItemQuery] = useState('')
+  const [showSuggestions, setShowSuggestions] = useState(false)
+  const itemInputRef = useRef(null)
+  const suggestionsRef = useRef(null)
   const [formData, setFormData] = useState({
     title: '', category: 'Classroom Equipment', location: '', assetCode: '',
     priority: 'LOW', emergencyReason: '', requestedItem: '', requestedQuantity: '1', requestedUnit: 'pcs', description: ''
@@ -87,11 +114,31 @@ function CreateRequest() {
     return () => { active = false }
   }, [id, isEditing, navigate])
 
+  const filteredItems = useMemo(() => {
+    const q = (itemQuery || formData.requestedItem || '').trim().toLowerCase()
+    if (!q || q.length < 2) return []
+    return campusItems.filter(item => item.toLowerCase().includes(q)).slice(0, 8)
+  }, [itemQuery, formData.requestedItem])
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (suggestionsRef.current && !suggestionsRef.current.contains(e.target) && itemInputRef.current && !itemInputRef.current.contains(e.target)) {
+        setShowSuggestions(false)
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside)
+    return () => document.removeEventListener('mousedown', handleClickOutside)
+  }, [])
+
   const handleInputChange = (e) => {
     const { name, value } = e.target
     if (name === 'description' && value.length > descMaxLength) return
     if (name === 'title' && value.length > titleMaxLength) return
     setFormData(prev => ({ ...prev, [name]: value }))
+    if (name === 'requestedItem') {
+      setItemQuery(value)
+      setShowSuggestions(true)
+    }
     if (errors[name]) setErrors(prev => ({ ...prev, [name]: '' }))
   }
 
@@ -303,10 +350,21 @@ function CreateRequest() {
               </div>
             </div>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-6">
-              <div className="sm:col-span-3">
+              <div className="sm:col-span-3 relative">
                 <label className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-600">Item / service needed <span className="text-rose-400">*</span></label>
-                <input type="text" name="requestedItem" placeholder="e.g. LED tube light, projector repair" value={formData.requestedItem} onChange={handleInputChange}
+                <input ref={itemInputRef} type="text" name="requestedItem" placeholder="e.g. LED tube light, projector repair" value={formData.requestedItem} onChange={handleInputChange} onFocus={() => { if (filteredItems.length) setShowSuggestions(true) }}
                   className={`w-full rounded-xl border bg-white px-4 py-3 text-sm text-slate-800 placeholder-slate-400 outline-none focus:ring-1 ${errors.requestedItem ? 'border-rose-400 focus:ring-rose-500' : 'border-slate-200 focus:border-violet-500 focus:ring-violet-500'}`} />
+                {showSuggestions && filteredItems.length > 0 && (
+                  <ul ref={suggestionsRef} className="absolute z-50 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-lg">
+                    {filteredItems.map((item, idx) => (
+                      <li key={idx}>
+                        <button type="button" className="w-full px-4 py-2.5 text-left text-sm text-slate-700 hover:bg-violet-50 hover:text-violet-700 transition-colors" onClick={() => { setFormData(prev => ({ ...prev, requestedItem: item })); setItemQuery(item); setShowSuggestions(false); if (errors.requestedItem) setErrors(prev => ({ ...prev, requestedItem: '' })) }}>
+                          {item}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 {errors.requestedItem && <span className="mt-1 flex items-center gap-1 text-xs font-semibold text-rose-500"><AlertTriangle size={10} />{errors.requestedItem}</span>}
               </div>
               <div className="sm:col-span-1">

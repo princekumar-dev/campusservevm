@@ -1,6 +1,7 @@
 import express from 'express'
 import webpush from 'web-push'
-import { connectToDatabase } from '../lib/mongo.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { PushSubscriptionOps, NotificationRaw, UserRaw } from '../db/index.js'
 import {
   storePushSubscription,
   removePushSubscription,
@@ -96,13 +97,9 @@ router.post('/deactivate', async (req, res) => {
       return res.status(400).json({ success: false, message: 'userEmail is required' })
     }
 
-    const mongoose = await connectToDatabase()
-    const db = mongoose.connection.db
-    const collection = db.collection('push_subscriptions')
-
     const filter = endpoint ? { userEmail, 'subscription.endpoint': endpoint } : { userEmail }
 
-    const result = await collection.updateMany(
+    const result = await PushSubscriptionOps.updateMany(
       filter,
       { $set: { active: false, status: 'expired', statusUpdatedAt: new Date(), deactivatedAt: new Date(), deactivatedReason: 'user_logout' } }
     )
@@ -333,10 +330,8 @@ router.post('/subscription-check', async (req, res) => {
       return res.status(400).json({ success: false, message: 'endpoint is required' })
     }
 
-    const mongoose = await connectToDatabase()
-    const subscription = await mongoose.connection.db.collection('push_subscriptions').findOne(
-      { 'subscription.endpoint': endpoint },
-      { projection: { userEmail: 1, active: 1, status: 1 } }
+    const subscription = await PushSubscriptionOps.findOne(
+      { 'subscription.endpoint': endpoint }
     )
 
     if (!subscription) return res.json({ success: true, found: false })
@@ -365,15 +360,10 @@ router.delete('/:id', async (req, res) => {
       })
     }
 
-    const mongoose = await connectToDatabase()
-    const db = mongoose.connection.db
-    const ObjectId = (await import('mongodb')).ObjectId
-
-    const collection = db.collection('notifications')
     const userEmail = String(req.headers['x-user-email'] || '').trim()
-    const query = { _id: new ObjectId(id) }
-    if (userEmail) query.userEmail = { $regex: `^${userEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, $options: 'i' }
-    const result = await collection.deleteOne(query)
+    const query = { id }
+    if (userEmail) query.userEmail = userEmail
+    const result = await NotificationRaw.deleteOne(query)
 
     if (result.deletedCount > 0) {
       res.json({ 
@@ -460,13 +450,8 @@ router.post('/approve-staff', async (req, res) => {
       })
     }
 
-    const mongoose = await connectToDatabase()
-    const db = mongoose.connection.db
-    const ObjectId = (await import('mongodb')).ObjectId
-
     // Get the notification to find staff email
-    const notifCollection = db.collection('notifications')
-    const hodNotification = await notifCollection.findOne({ _id: new ObjectId(notificationId) })
+    const hodNotification = await NotificationRaw.findOne({ id: notificationId })
     
     if (!hodNotification) {
       return res.status(404).json({ success: false, message: 'Notification not found' })
@@ -475,8 +460,8 @@ router.post('/approve-staff', async (req, res) => {
     const staffEmail = hodNotification.data?.staffEmail
 
     // Update HOD's notification status
-    await notifCollection.updateOne(
-      { _id: new ObjectId(notificationId) },
+    await NotificationRaw.updateOne(
+      { id: notificationId },
       { 
         $set: { 
           'data.status': approved ? 'approved' : 'rejected',
@@ -489,7 +474,7 @@ router.post('/approve-staff', async (req, res) => {
 
     // Update staff's own notification
     if (staffEmail) {
-      await notifCollection.updateOne(
+      await NotificationRaw.updateOne(
         { 
           userEmail: staffEmail,
           type: 'staff_account_request',
@@ -503,16 +488,14 @@ router.post('/approve-staff', async (req, res) => {
             body: approved 
               ? 'Your staff account has been approved by HOD' 
               : 'Your staff account request was rejected',
-            read: false  // Keep unread so staff sees the update
+            read: false
           } 
         }
       )
     }
 
     if (!approved) {
-      // Delete the staff account
-      const usersCollection = db.collection('users')
-      await usersCollection.deleteOne({ _id: new ObjectId(staffId) })
+      await UserRaw.deleteOne({ id: staffId })
     }
 
     res.json({ 

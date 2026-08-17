@@ -1,5 +1,5 @@
-import { connectToDatabase } from '../lib/mongo.js'
-import { ServiceRequest, PurchaseOrder, GoodsReceipt, VendorQuotation, Vendor } from '../models.js'
+import { connectToDatabase } from '../lib/pg.js'
+import { ServiceRequest, PurchaseOrder, GoodsReceipt, VendorQuotation, Vendor } from '../db/index.js'
 import PDFDocument from 'pdfkit'
 import sharp from 'sharp'
 import QRCode from 'qrcode'
@@ -282,7 +282,7 @@ function renderServiceDocument(res, type, request, brand) {
   }
   if (!config) return res.status(404).json({ success: false, error: `No ${type} is available for this request yet` })
 
-  const filename = `${config.reference || `${type}-${request._id}`}.pdf`.replace(/[^a-z0-9._-]/gi, '-')
+  const filename = `${config.reference || `${type}-${request.id}`}.pdf`.replace(/[^a-z0-9._-]/gi, '-')
   res.setHeader('Content-Type', 'application/pdf')
   res.setHeader('Content-Disposition', `inline; filename="${filename}"`)
   const doc = new PDFDocument({ size: 'A4', margin: 50, bufferPages: true, info: {
@@ -350,9 +350,9 @@ export default async function handler(req, res) {
 
   try {
     if (type === 'vendor-quotation') {
-      const quotation = await VendorQuotation.findById(id).lean()
+      const quotation = await VendorQuotation.findById(id)
       if (!quotation) return res.status(404).json({ success: false, error: 'Quotation not found' })
-      const request = await ServiceRequest.findById(quotation.requestId).lean()
+      const request = await ServiceRequest.findById(quotation.requestId)
       if (!request) return res.status(404).json({ success: false, error: 'Linked request not found' })
       const brand = await getPdfBrand(request.institution || 'msec')
       return renderServiceDocument(res, 'quotation', { ...request, quotation }, brand)
@@ -365,8 +365,6 @@ export default async function handler(req, res) {
         return res.status(403).json({ success: false, error: 'Only the responsible manager can download a purchase order' })
       }
       const po = await PurchaseOrder.findById(id)
-        .select('-signedPo.url -documentUrl -serviceExecution.workEvidence.url -serviceExecution.expenses.bill.url -statusHistory')
-        .lean()
       if (!po) return res.status(404).json({ success: false, error: 'Purchase Order not found' })
       if (
         (po.createdById && String(po.createdById) !== String(actorId)) ||
@@ -375,25 +373,25 @@ export default async function handler(req, res) {
         return res.status(403).json({ success: false, error: 'You can download only purchase orders assigned to you' })
       }
       const finalGrn = po.status === 'CLOSED'
-        ? await GoodsReceipt.findOne({ poId: po._id, grnType: 'FINAL' }).sort({ createdAt: -1 }).lean()
+        ? await GoodsReceipt.findOne({ poId: po.id, grnType: 'FINAL' }, { sort: { createdAt: -1 } })
         : null
       po.items = addProductIds(po.items)
-      const poQrToken = createPoQrToken(po._id)
+      const poQrToken = createPoQrToken(po.id)
       await PurchaseOrder.updateOne(
-        { _id: po._id },
+        { id: po.id },
         { $set: { qrTokenHash: hashPoQrToken(poQrToken), qrIssuedAt: new Date() } }
       )
-      const linkedRequest = po.requestId ? await ServiceRequest.findById(po.requestId).lean() : null
+      const linkedRequest = po.requestId ? await ServiceRequest.findById(po.requestId) : null
       const brand = await getPdfBrand(linkedRequest?.institution || 'msec')
       if (!po.vendorAddress && po.vendorId) {
-        const vendor = await Vendor.findById(po.vendorId).select('address').lean()
+        const vendor = await Vendor.findById(po.vendorId)
         if (vendor?.address) po.vendorAddress = vendor.address
       }
       const isServicePo = linkedRequest?.adminAssessment?.requirementType === 'MAINTENANCE'
       const poDocumentTitle = isServicePo ? 'SERVICE PURCHASE ORDER' : 'PURCHASE ORDER'
       const gateVerificationUrl = isServicePo
-        ? `${getPublicBaseUrl(req)}/service/po/${po._id}?portal=service&token=${encodeURIComponent(poQrToken)}`
-        : `${getPublicBaseUrl(req)}/gate/po/${po._id}?token=${encodeURIComponent(poQrToken)}`
+        ? `${getPublicBaseUrl(req)}/service/po/${po.id}?portal=service&token=${encodeURIComponent(poQrToken)}`
+        : `${getPublicBaseUrl(req)}/gate/po/${po.id}?token=${encodeURIComponent(poQrToken)}`
       const gateQrImage = await QRCode.toBuffer(gateVerificationUrl, {
         type: 'png',
         width: 220,
@@ -669,7 +667,7 @@ export default async function handler(req, res) {
       doc.end()
       return
     }
-    const request = await ServiceRequest.findById(id).lean()
+    const request = await ServiceRequest.findById(id)
     if (!request) {
       return res.status(404).json({ success: false, error: 'Service Request not found' })
     }

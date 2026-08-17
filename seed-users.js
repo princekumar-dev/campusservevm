@@ -1,5 +1,5 @@
-import { connectToDatabase } from './lib/mongo.js'
-import { User, ServiceRequest, Notification, Vendor, PurchaseOrder, DeliverySchedule, GoodsReceipt, GateEntry } from './models.js'
+import { connectToDatabase } from './lib/pg.js'
+import { User, ServiceRequest, Notification, Vendor, PurchaseOrder, DeliverySchedule, GoodsReceipt, GateEntry } from './db/index.js'
 import bcrypt from 'bcryptjs'
 
 const campusUsers = [
