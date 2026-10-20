@@ -1,464 +1,234 @@
-# CampusServe - Campus Management System
+<div align="center">
 
-![CampusServe Logo](public/images/mseclogo.png)
+<img src="public/images/camlogo.webp" alt="CampusServe logo" width="120">
 
-## 🎓 Overview
+# CampusServe VM
 
-**CampusServe** is a comprehensive web-based campus management system designed specifically for Mohamed Sathak Engineering College (MSEC). The platform streamlines the process of marksheet generation, verification, approval, and dispatch through an intuitive interface for staff and department heads.
+### Multi-Institution Campus Procurement & Service Management Platform
+
+**From service request to payment — one audited workflow for campuses**
+
+![React](https://img.shields.io/badge/React-18-61DAFB?logo=react&logoColor=white)
+![Vite](https://img.shields.io/badge/Vite-5-646CFF?logo=vite&logoColor=white)
+![Tailwind CSS](https://img.shields.io/badge/Tailwind_CSS-3-38B2AC?logo=tailwindcss&logoColor=white)
+![Express](https://img.shields.io/badge/Express-4-000000?logo=express&logoColor=white)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-31_tables-4169E1?logo=postgresql&logoColor=white)
+![PWA](https://img.shields.io/badge/PWA-Web_Push-5A0FC8?logo=pwa&logoColor=white)
+![Tests](https://img.shields.io/badge/Tests-Vitest-729B1B?logo=vitest&logoColor=white)
+![Deploy](https://img.shields.io/badge/Deploy-Vercel_%7C_Render_%7C_Ubuntu_VM-black)
+
+</div>
+
+---
+
+## 📖 Overview
+
+**CampusServe VM** is a full-stack web platform that digitises how educational institutions handle
+**service requests, procurement, deliveries, gate verification, and payments**. A request raised by
+a faculty member flows through an enforced state machine — quotation → approval → purchase order →
+QR-verified delivery at the gate → goods receipt → invoice → payment — with every transition
+logged, notified, and auditable.
+
+The platform is **multi-institution** (MSEC, The Nest School, MSSM, IIET) with per-institution
+units, labels, and role semantics, and ships as a **progressive web app** so staff can work from
+phones as easily as desktops.
 
 ## ✨ Features
 
-### 📊 Marksheet Management
-- **Excel Import**: Bulk import student marks from Excel files
-- **Automated Marksheet Generation**: Create professional marksheets with student details and grades
-- **PDF Generation**: Generate high-quality PDF marksheets with signatures
-- **Marksheet Verification**: Staff verification workflow with digital signatures
-- **Status Tracking**: Real-time tracking of marksheet status through the approval pipeline
+### 🔄 Request-to-Payment Workflow
+- **State-machine engine** (`lib/workflowEngine.js`) with enforced transitions — requests cannot skip approval steps
+- **Full lifecycle**: `DRAFT → SUBMITTED → APPROVED → QUOTATION → WORK_ORDER → IN_PROGRESS → SERVICE_VERIFIED → INVOICE → PAYMENT → CLOSED`, plus clarification, revision, pause, reopen and cancellation paths
+- **Role-owned states** — every status has exactly one responsible role (admin, manager, accounts…)
+- Status history tables record who changed what, and when
 
-### 🔐 Role-Based Access Control
-- **Staff Users**: Import marks, generate marksheets, request dispatch
-- **HOD (Head of Department)**: Approve/reject dispatch requests, view department overview
-- **Secure Authentication**: JWT-based authentication system
-- **Department-Specific Access**: Users restricted to their respective departments
+### 🛒 Procurement & Vendors
+- **Vendor directory** with quotations and item-level quote comparison
+- **Purchase orders** with PDF export (Tamil + Latin fonts via Noto Sans Tamil), status history and expense tracking
+- **Work orders** with materials, additional-cost capture and progress updates
 
-### 📱 WhatsApp Integration
-- **Automated Dispatch**: Send marksheet notifications via WhatsApp
-- **Bulk Messaging**: Send notifications to multiple parents/students
-- **Status Updates**: Track delivery status of WhatsApp messages
-- **Template Messages**: Pre-formatted messages with student details
+### 🚪 Gate & Logistics
+- **QR-verified gate entry** — signed PO QR tokens (`PO_QR_SECRET`) validated at the gate
+- **Geofenced check-in** (`lib/gateGeofence.js`) so verification only counts at the campus location
+- Delivery persons, vehicles and scheduled deliveries with per-stage status tracking
+- **GRN (goods receipt)** with item-level acceptance and damage reporting
 
-### 📈 Analytics & Reporting
-- **Department Overview**: Comprehensive view of all marksheets in a department
-- **Approval Statistics**: Track pending, approved, and dispatched marksheets
-- **Export Reports**: Generate and export department-wise reports
-- **Dashboard Analytics**: Real-time statistics and recent activity
+### 💰 Accounts & Invoices
+- Vendor invoices with line items, payment tracking and service-request payment records
+- Accounts dashboard for pending invoices and payment status
 
-### 🎨 Modern UI/UX
-- **Responsive Design**: Optimized for desktop, tablet, and mobile devices
-- **Glass Morphism Design**: Modern aesthetic with backdrop blur effects
-- **Intuitive Navigation**: Clean, user-friendly interface
-- **Real-time Updates**: Live status updates without page refresh
+### 🔔 Notifications (three channels)
+- **WhatsApp** via Evolution API (instance-based messaging)
+- **Email** via Resend or SMTP, with email-verification flows
+- **Web push** (VAPID + service worker) with per-user notification settings
 
-## 🛠️ Technology Stack
+### 📊 Dashboards & Reporting
+- Role-specific dashboards: Admin, Manager, Gate, Service, Accounts, Vendor, Requester/HOD
+- KPI cards, charts (Recharts) and exportable reports
 
-### Frontend
-- **React 18**: Modern component-based UI library with hooks
-- **Vite**: Lightning-fast build tool and development server
-- **React Router**: Client-side routing for single-page application
-- **Tailwind CSS**: Utility-first CSS framework for responsive design
-- **Axios**: HTTP client for API communication
+### 🔐 Security & Audit
+- JWT auth + bcrypt hashing, email verification, helmet headers, CORS allow-list, rate limiting
+- Signed QR tokens and email-verification secrets kept separate from `JWT_SECRET`
+- **`audit_logs` table + Admin Audit page** — every sensitive action is traceable
 
-### Backend
-- **Node.js**: Server-side JavaScript runtime
-- **Express.js**: Fast, unopinionated web framework
-- **MongoDB**: NoSQL database for flexible data storage
-- **Mongoose**: MongoDB object modeling for Node.js
-- **JWT**: JSON Web Tokens for secure authentication
-- **bcryptjs**: Password hashing for security
+## 🏫 Multi-Institution Support
 
-### Libraries & Tools
-- **ExcelJS**: Excel file processing and generation
-- **PDFKit**: PDF document generation
-- **Twilio**: WhatsApp API integration
-- **Multer**: File upload handling
-- **CORS**: Cross-origin resource sharing
-- **Dotenv**: Environment variable management
+| Institution | Unit label | Example units |
+|---|---|---|
+| MSEC | Department | CSE, ECE, MECH, CIVIL, IT, EEE, AIDS |
+| The Nest School | School Section | Early Years, Primary, Middle, Secondary |
+| MSSM | Management Department | Finance, Marketing, HR, Operations |
+| IIET (legacy `iic`) | Innovation Function | Innovation Council, Startup, Entrepreneurship |
 
-## 🏗️ Architecture
+Institution users (requester / staff / HOD) are scoped to their institution and unit.
 
-```
-CampusServe/
-├── Frontend (React + Vite) - Port 3000
-│   ├── Components (Header, Settings, ErrorBoundary)
-│   ├── Pages (Home, Login, Marksheets, ImportMarks, etc.)
-│   ├── Utils (Notifications, Authentication)
-│   └── Assets (Images, Icons)
-│
-├── Backend (Node.js + Express) - Port 3001
-│   ├── API Routes (/api/auth, /api/marksheets, /api/import-excel)
-│   ├── Models (User, Student, Marksheet, ImportSession)
-│   ├── Middleware (Authentication, File Upload)
-│   └── Services (PDF Generation, WhatsApp Dispatch)
-│
-└── Database (MongoDB Atlas)
-    ├── Users Collection
-    ├── Students Collection
-    ├── Marksheets Collection
-    └── ImportSessions Collection
-```
+## 🗄️ Data Model (PostgreSQL — 31 tables)
+
+`users` · `service_requests` (+ evidence & status history) · `vendors` · `vendor_quotations` (+ items) ·
+`purchase_orders` (+ items, history, expenses, work evidence) · `delivery_persons` · `vehicles` ·
+`delivery_schedules` (+ items, history) · `gate_entries` · `goods_receipts` (+ items) ·
+`work_order_updates/materials/additional_costs` · `invoice_items` · `service_request_payments` ·
+`notifications` · `push_subscriptions` · `audit_logs` · `email_verifications` · `system_settings`
+
+Full DDL lives in [`schema.sql`](schema.sql). A one-shot MongoDB → PostgreSQL migration script is
+included (`npm run migrate:mongo-to-postgres` — see [MONGO_TO_POSTGRES_MIGRATION.md](MONGO_TO_POSTGRES_MIGRATION.md)).
+
+## 🛠️ Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Frontend | React 18, Vite, Tailwind CSS, React Router, Recharts, Lucide icons, PWA (service worker + web push) |
+| Backend | Node.js + Express (`server.js`), serverless-ready endpoints in `api/` (Vercel) |
+| Database | PostgreSQL (`pg`), SQL-first schema, LRU caching |
+| Auth | JWT, bcryptjs, email verification |
+| Notifications | Evolution API (WhatsApp), Resend/SMTP (email), Web Push (VAPID) |
+| Documents | PDFKit (POs/invoices with Tamil fonts), QR codes, JSZip exports |
+| Security | helmet, express-rate-limit, CORS allow-list, signed tokens, audit logging |
+| Quality | Vitest (unit + component tests), smoke tests, performance tests, deployment verifier |
 
 ## 🚀 Getting Started
 
 ### Prerequisites
-- **Node.js** (v16 or higher)
-- **npm** or **yarn** package manager
-- **MongoDB Atlas** account (or local MongoDB installation)
-- **Twilio** account for WhatsApp integration (optional)
+- **Node.js 18+**
+- **PostgreSQL 14+** (local or hosted)
 
 ### Installation
 
-1. **Clone the repository**
-   ```bash
-   git clone https://github.com/princekumar-dev/Campus-servre--2.git
-   cd Campus-servre--2
-   ```
+```bash
+git clone https://github.com/princekumar-dev/campusservevm.git
+cd campusservevm
+npm install
+```
 
-2. **Install dependencies**
-   ```bash
-   npm install
-   ```
+### Configure environment
 
-3. **Environment Configuration**
-   Create a `.env` file in the root directory:
-   ```env
-   # Database
-   MONGODB_URI=mongodb+srv://your-connection-string
+```bash
+cp .env.example .env
+# then edit .env — the essentials:
+#   DATABASE_URL=postgresql://user:password@localhost:5432/campusserve
+#   JWT_SECRET=<long random>
+#   PO_QR_SECRET=<a different long random>
+#   EMAIL_VERIFICATION_SECRET=<a third long random>
+```
 
-   # JWT
-   JWT_SECRET=your-super-secure-jwt-secret-key
+Optional channels: `EVOLUTION_API_URL/KEY/INSTANCE_NAME` (WhatsApp), `RESEND_API_KEY` or
+`SMTP_*` (email), `VAPID_PUBLIC_KEY/VAPID_PRIVATE_KEY` (web push — generate with
+`npx web-push generate-vapid-keys`).
 
-   # Server
-   PORT=3001
-   NODE_ENV=development
+### Initialise the database
 
-   # Twilio (for WhatsApp - optional)
-   TWILIO_ACCOUNT_SID=your-twilio-account-sid
-   TWILIO_AUTH_TOKEN=your-twilio-auth-token
-   TWILIO_WHATSAPP_NUMBER=your-twilio-whatsapp-number
-   ```
+```bash
+npm run init:postgres        # creates tables from schema.sql
+npm run seed-users           # optional starter users
+npm run ensure-super-admin   # guarantees an admin account
+npm run ensure-gate-service-users
+```
 
-4. **Seed initial data** (optional)
-   ```bash
-   npm run seed-users
-   ```
+### Run
 
-5. **Start the development servers**
+```bash
+npm run dev:full   # API (:3001) + Vite dev server (:3000) together
+# or separately:
+npm run server     # Express API
+npm run dev        # Vite frontend
+```
 
-   **Backend Server:**
-   ```bash
-   npm run server
-   ```
+### Test
 
-   **Frontend Development Server:**
-   ```bash
-   npm run dev
-   ```
+```bash
+npm run test:run        # Vitest suite (workflow engine, geofence, QR tokens, receiving…)
+npm run test:coverage
+```
 
-   **Or run both simultaneously:**
-   ```bash
-   npm run dev:full
-   ```
+## ☁️ Deployment
 
-6. **Access the application**
-   - Frontend: `http://localhost:3000`
-   - Backend API: `https://campus-servre-2.onrender.com/`
+| Target | How | Guide |
+|---|---|---|
+| **Vercel** | Serverless `api/` endpoints + built frontend | [vercel.json](vercel.json) |
+| **Render** | Full-stack service from `render.yaml` | [DEPLOYMENT_RENDER.md](DEPLOYMENT_RENDER.md) |
+| **Ubuntu VM** | nginx reverse proxy + systemd services + backup timer | [VM_DEPLOYMENT.md](VM_DEPLOYMENT.md), [`deploy/`](deploy/) |
+| **CI builds** | GitHub Actions build with optional Brotli/Gzip artifacts | [.github/workflows/build.yml](.github/workflows/build.yml) |
+
+After deploying, run the built-in verifier:
+
+```bash
+npm run verify:deployment
+```
+
+## 📚 Documentation
+
+| Guide | Covers |
+|---|---|
+| [WORKFLOW_GUIDE.md](WORKFLOW_GUIDE.md) | Official service workflow, SLA & evidence policy, role queues |
+| [TESTING_QUICKSTART.md](TESTING_QUICKSTART.md) | Running and writing tests |
+| [MONGO_TO_POSTGRES_MIGRATION.md](MONGO_TO_POSTGRES_MIGRATION.md) | Database migration walkthrough |
+| [DEPLOYMENT_RENDER.md](DEPLOYMENT_RENDER.md) / [VM_DEPLOYMENT.md](VM_DEPLOYMENT.md) | Hosting setup |
+| [NOTIFICATION_SYSTEM_IMPROVEMENTS.md](NOTIFICATION_SYSTEM_IMPROVEMENTS.md) | Notification architecture |
+| [design_system_guide.md](design_system_guide.md) / [design-qa.md](design-qa.md) | UI conventions & QA notes |
+| [FIX_CORS_NOW.md](FIX_CORS_NOW.md) / [IMAGE_OPTIMIZATION.md](IMAGE_OPTIMIZATION.md) / [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) | Ops playbooks & change summaries |
+
+Visual QA screenshots of every role dashboard live in [`audit-output/`](audit-output/).
 
 ## 📁 Project Structure
 
 ```
-src/
-├── components/
-│   ├── ErrorBoundary.jsx          # Error handling component
-│   ├── Header.jsx                 # Navigation header
-│   ├── NotificationModal.jsx      # Notification display
-│   ├── Settings.jsx               # User settings panel
-│   └── Skeleton.jsx               # Loading skeleton
-├── pages/
-│   ├── Home.jsx                   # Dashboard with stats
-│   ├── Login.jsx                  # Authentication page
-│   ├── SignUp.jsx                 # User registration
-│   ├── ImportMarks.jsx            # Excel import interface
-│   ├── Marksheets.jsx             # Marksheet listing
-│   ├── MarksheetDetails.jsx       # Individual marksheet view
-│   ├── DispatchRequests.jsx       # Staff dispatch requests
-│   ├── ApprovalRequests.jsx       # HOD approval interface
-│   ├── DepartmentOverview.jsx     # Department-wide view
-│   ├── Reports.jsx                # Report generation
-│   ├── Records.jsx                # Historical records
-│   ├── Contact.jsx                # Contact information
-│   ├── PrivacyPolicy.jsx          # Privacy policy
-│   ├── TermsOfService.jsx         # Terms of service
-│   ├── FAQ.jsx                    # Frequently asked questions
-│   └── NotFound.jsx               # 404 error page
-├── utils/
-│   ├── notifications.js           # Notification utilities
-│   └── notification-switcher.js   # Notification management
-├── App.jsx                        # Main application component
-├── main.jsx                       # Application entry point
-└── index.css                      # Global styles
-
-api/
-├── auth.js                        # Authentication endpoints
-├── users.js                       # User management
-├── marksheets.js                  # Marksheet CRUD operations
-├── import-excel.js                # Excel import handling
-├── generate-pdf.js                # PDF generation + report export
-├── whatsapp-dispatch.js           # WhatsApp messaging
-├── notifications.js               # Notification management
-├── demo-excel.js                  # Demo Excel generation
-└── examinations.js                # Examination management
-
-lib/
-├── mongo.js                       # MongoDB connection
-├── notificationService.js         # Notification service
-└── subscriptionManager.js         # Subscription management
-
-scripts/
-├── make-demo-excel.js             # Generate demo Excel files
-└── show-samples.js                # Display sample data
-
-models.js                          # Database models
-server.js                          # Express server setup
+campusservevm/
+├── api/                  # Serverless API endpoints (auth, POs, GRN, invoices, payments…)
+├── backend/              # Extended modules (deliveries, gate, GRN, POs, vendors…)
+├── lib/                  # Core services: auth, workflow engine, notifications, geofence, QR
+├── src/                  # React app
+│   ├── components/       # UI kit (glass panels, KPI cards, bottom nav, modals…)
+│   ├── pages/            # Role dashboards: Admin, Manager, Gate, Service, Accounts, Vendor…
+│   ├── hooks/            # Pull-to-refresh, push notifications, intersection observer
+│   └── utils/            # API client, auth, notification events, workflow guidance
+├── db/                   # PostgreSQL client
+├── scripts/              # Init, seed, migration, smoke/performance tests, image conversion
+├── deploy/               # nginx, systemd units, backup scripts, Ubuntu setup
+├── public/               # PWA assets, icons, institution logos, service worker
+├── schema.sql            # Full PostgreSQL DDL (31 tables)
+├── server.js             # Express server entry
+└── render.yaml / vercel.json   # Deployment blueprints
 ```
-
-## 👥 User Roles & Permissions
-
-### 👨‍🏫 Staff Users
-- Import student marks from Excel files
-- Generate and verify marksheets
-- Add digital signatures to marksheets
-- Request dispatch approval from HOD
-- View personal marksheet statistics
-- Track dispatch status
-
-### 🏫 Head of Department (HOD)
-- Approve or reject dispatch requests
-- View all department marksheets
-- Generate department reports
-- Reschedule dispatch dates
-- Monitor department performance
-- Access comprehensive analytics
-
-## 🌟 Key Features & Workflows
-
-### 📥 Excel Import Process
-1. **Upload Excel File**: Staff uploads formatted Excel file with student marks
-2. **Data Validation**: System validates data format and completeness
-3. **Preview & Confirm**: Review imported data before processing
-4. **Marksheet Generation**: Automatic creation of individual marksheets
-
-### 🔄 Approval Workflow
-1. **Draft**: Initial marksheet creation
-2. **Verified by Staff**: Staff verification with signature
-3. **Dispatch Requested**: Staff requests HOD approval
-4. **HOD Review**: HOD approves/rejects or reschedules
-5. **Approved by HOD**: Ready for dispatch
-6. **Dispatched**: WhatsApp notification sent to parents
-
-### 📱 WhatsApp Dispatch
-- **Individual Messages**: Send marksheet links to specific students
-- **Bulk Messages**: Send notifications to entire classes
-- **Status Tracking**: Monitor delivery and read status
-- **Template Customization**: Pre-formatted messages with student details
-
-## 📊 Database Schema
-
-### User Model
-```javascript
-{
-  email: String (unique),
-  password: String (hashed),
-  role: 'staff' | 'hod',
-  name: String,
-   department: 'CSE' | 'AI_DS' | 'ECE' | 'MECH' | 'CIVIL' | 'EEE' | 'HNS',
-  year: String, // Staff only
-  section: String, // Staff only
-  eSignature: String, // Base64 encoded
-  phoneNumber: String,
-  createdAt: Date
-}
-```
-
-### Student Model
-```javascript
-{
-  name: String,
-  regNumber: String (unique),
-  year: String,
-  section: String,
-  department: String,
-  parentPhoneNumber: String,
-  examinationName: String,
-  examinationDate: Date,
-  createdAt: Date
-}
-```
-
-### Marksheet Model
-```javascript
-{
-  marksheetId: String (unique),
-  studentId: ObjectId (ref: Student),
-  studentDetails: Object,
-  examinationName: String,
-  examinationDate: Date,
-  semester: String,
-  subjects: [{
-    subjectName: String,
-    marks: Number,
-    grade: String
-  }],
-  overallGrade: String,
-  staffId: ObjectId (ref: User),
-  staffName: String,
-  staffSignature: String,
-  hodId: ObjectId (ref: User),
-  hodName: String,
-  hodSignature: String,
-  principalSignature: String,
-  status: 'draft' | 'verified_by_staff' | 'dispatch_requested' |
-          'rescheduled_by_hod' | 'approved_by_hod' | 'rejected_by_hod' | 'dispatched',
-  dispatchRequest: Object,
-  dispatchStatus: Object,
-  visited: Boolean,
-  visitedAt: Date,
-  createdAt: Date,
-  updatedAt: Date
-}
-```
-
-## 🔧 API Documentation
-
-### Authentication Endpoints
-- `POST /api/auth/login` - User login
-- `POST /api/auth/logout` - User logout
-- `GET /api/auth/verify` - Verify JWT token
-
-### Marksheet Endpoints
-- `GET /api/marksheets` - Get marksheets (filtered by user role)
-- `POST /api/marksheets` - Create new marksheet
-- `PUT /api/marksheets/:id` - Update marksheet
-- `DELETE /api/marksheets/:id` - Delete marksheet
-- `GET /api/marksheets/:id` - Get specific marksheet
-
-### Import Endpoints
-- `POST /api/import-excel` - Import marks from Excel
-- `GET /api/demo-excel` - Download demo Excel template
-
-### Dispatch Endpoints
-- `POST /api/whatsapp-dispatch/send-marksheet` - Send individual marksheet
-- `POST /api/whatsapp-dispatch/send-bulk` - Send bulk notifications
-
-### Report Endpoints
-- `POST /api/generate-pdf` - Generate marksheets, leave letters, and department report exports
-
-## 📋 Scripts & Commands
-
-```bash
-# Development
-npm run dev              # Start frontend dev server
-npm run server           # Start backend server
-npm run dev:full         # Start both frontend and backend
-
-# Build & Deploy
-npm run build            # Build for production
-npm run preview          # Preview production build
-
-# Database
-npm run seed-users       # Seed initial user data
-
-# Utilities
-npm run clean            # Clean dist directory
-npm run warm-tunnel      # Warm up tunnel connection
-```
-
-## 🚀 Deployment
-
-### Production Deployment
-1. **Build the frontend**
-   ```bash
-   npm run build
-   ```
-
-2. **Environment Variables**
-   Set production environment variables in your hosting platform
-
-3. **Database**
-   Ensure MongoDB Atlas connection string is configured
-
-4. **Deploy Options**
-   - **Vercel**: Frontend deployment with serverless functions
-   - **Railway/Heroku**: Full-stack deployment
-   - **Docker**: Containerized deployment
-
-### Environment Variables (Production)
-```env
-NODE_ENV=production
-MONGODB_URI=mongodb+srv://production-connection
-JWT_SECRET=secure-production-jwt-secret
-TWILIO_ACCOUNT_SID=production-twilio-sid
-TWILIO_AUTH_TOKEN=production-twilio-token
-TWILIO_WHATSAPP_NUMBER=production-whatsapp-number
-```
-
-### Enabling compressed build artifacts in CI (Brotli/Gzip)
-
-The repository disables the `vite-plugin-compression` plugin on Windows to avoid path issues during local development. To enable generation of `.br` and `.gz` artifacts in CI (recommended for serving pre-compressed assets), set the environment variable `ENABLE_COMPRESSION=true` in your CI environment before running the build.
-
-Examples:
-
-- GitHub Actions (Linux runner):
-   ```yaml
-   - name: Build frontend
-      run: ENABLE_COMPRESSION=true npm run build
-   ```
-
-- GitLab CI:
-   ```yaml
-   build_frontend:
-      image: node:18
-      script:
-         - ENABLE_COMPRESSION=true npm ci
-         - ENABLE_COMPRESSION=true npm run build
-   ```
-
-- Vercel / Netlify: add an environment variable named `ENABLE_COMPRESSION` with value `true` in the project settings, and ensure your build command runs `npm run build`.
-
-Note: The `vite.config.js` only enables compression when `ENABLE_COMPRESSION=true` and the runner platform is not Windows. This keeps local Windows builds fast and avoids `.br`/`.gz` file path issues.
 
 ## 🤝 Contributing
 
-We welcome contributions to improve CampusServe!
+1. Fork and create a feature branch: `git checkout -b feature/your-feature`
+2. Follow the existing structure and add tests for new logic
+3. Commit with a clear message and open a Pull Request
 
-1. **Fork the repository**
-2. **Create a feature branch**: `git checkout - b feature/amazing-feature`
-3. **Commit your changes**: `git commit -m 'Add amazing feature'`
-4. **Push to the branch**: `git push origin feature/amazing-feature`
-5. **Open a Pull Request**
+## 📄 License
 
-### Development Guidelines
-- Follow existing code style and structure
-- Add proper error handling
-- Update documentation for new features
-- Test thoroughly before submitting PR
+No license file has been declared yet. All rights reserved by the author unless stated otherwise —
+reach out before reusing.
 
-## 📝 License
+## 👤 Author
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+**Prince Kumar** — [@princekumar-dev](https://github.com/princekumar-dev)
 
-## 🙋‍♂️ Support & Contact
-
-### Technical Support
-- **Developer**: Prince Kumar
-- **GitHub**: [@princekumar-dev](https://github.com/princekumar-dev)
-- **Email**: Contact through the application's contact page
-
-### Institution Contact
-- **Mohamed Sathak Engineering College**
-- **Website**: [https://msec.edu.in](https://msec.edu.in)
-- **Location**: Chennai, Tamil Nadu, India
-
-## 🏆 Acknowledgments
-
-- **Mohamed Sathak Engineering College** for institutional support
-- **React Community** for the excellent framework
-- **MongoDB** for the flexible database solution
-- **Twilio** for WhatsApp integration capabilities
-- **Tailwind CSS** for the utility-first CSS framework
-- **Vite** for the lightning-fast development experience
+Built for the **Mohamed Sathak Engineering College (MSEC)** community and partner institutions
+(The Nest School, MSSM, IIET) — Chennai, Tamil Nadu, India.
 
 ---
 
-**Built with ❤️ for MSEC Community**
-
-*CampusServe - Empowering Education Through Technology*
+<div align="center">
+<sub><b>CampusServe VM</b> — campus operations, one audited workflow at a time.</sub>
+</div>
