@@ -224,7 +224,7 @@ reach out before reusing.
 
 **Prince Kumar** — [@princekumar-dev](https://github.com/princekumar-dev)
 
-Built for the **Mohamed Sathak Engineering College (MSEC)** community and partner institutions
+Built for the **Meenakshi Sundararajan Engineering College (MSEC)** community and partner institutions
 (The Nest School, MSSM, IIET) — Chennai, Tamil Nadu, India.
 
 ---
